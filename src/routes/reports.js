@@ -27,12 +27,12 @@ router.get('/summary', requireAuth, ADMIN, async (req, res) => {
 
     const [[yesterday]] = await db.query(`
       SELECT COALESCE(SUM(selling_total), 0) AS revenue
-      FROM sales WHERE status='completed' AND DATE(sale_date) = CURDATE() - INTERVAL 1 DAY
+      FROM sales WHERE status='completed' AND DATE(sale_date) = CURRENT_DATE - INTERVAL '1 day'
     `);
 
     const [[today]] = await db.query(`
       SELECT COALESCE(SUM(selling_total), 0) AS revenue
-      FROM sales WHERE status='completed' AND DATE(sale_date) = CURDATE()
+      FROM sales WHERE status='completed' AND DATE(sale_date) = CURRENT_DATE
     `);
 
     const [[lowStockRow]] = await db.query(
