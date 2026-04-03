@@ -10,25 +10,26 @@ const router = express.Router();
 // POST /api/auth/login
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ error: 'Email and password required' });
+    const { identifier, password } = req.body;
+    if (!identifier || !password)
+      return res.status(400).json({ error: 'Name and password required' });
 
+    // Try to find user by name first, then by email
     const [[user]] = await db.query(
       `SELECT id, name, email, password_hash, role, avatar, status, commission_rate, last_login
-       FROM users WHERE email = ?`,
-      [email.trim().toLowerCase()]
+       FROM users WHERE name ILIKE ? OR email = ?`,
+      [identifier.trim(), identifier.trim().toLowerCase()]
     );
 
     if (!user)
-      return res.status(401).json({ error: 'Invalid email or password' });
+      return res.status(401).json({ error: 'Invalid name or password' });
 
     if (user.status === 'inactive')
       return res.status(403).json({ error: 'Account deactivated. Contact your administrator.' });
 
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid)
-      return res.status(401).json({ error: 'Invalid email or password' });
+      return res.status(401).json({ error: 'Invalid name or password' });
 
     // Update last_login
     await db.query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
