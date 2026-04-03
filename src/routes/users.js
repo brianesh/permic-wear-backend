@@ -36,17 +36,17 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
     const avatar  = name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
     const rate    = commission_rate ?? 10;
 
-    const [result] = await db.query(
+    const [rows] = await db.query(
       `INSERT INTO users (name, email, password_hash, role, avatar, commission_rate) VALUES (?, ?, ?, ?, ?, ?)`,
       [name, email.toLowerCase(), hash, role || 'cashier', avatar, rate]
     );
 
     await log(req.user.id, req.user.name, req.user.role, 'user_created', name, `Role: ${role}`, 'users', req.ip);
-    res.status(201).json({ id: result.insertId, message: 'User created' });
+    res.status(201).json({ id: rows[0].id, message: 'User created' });
 
   } catch (err) {
     console.error('[users] POST /:', err.message);
-    if (err.code === 'ER_DUP_ENTRY')
+    if (err.code === '23505')
       return res.status(409).json({ error: 'Email already in use' });
     res.status(500).json({ error: 'Failed to create user' });
   }

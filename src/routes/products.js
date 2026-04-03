@@ -10,7 +10,7 @@ const ADMIN  = requireRole('super_admin', 'admin');
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { brand, brand_id, sub_type_id, top_type, category, search } = req.query;
-    let sql    = 'SELECT * FROM products WHERE is_active = 1';
+    let sql    = 'SELECT * FROM products WHERE is_active = true';
     const vals = [];
 
     if (brand      && brand      !== 'All') { sql += ' AND brand = ?';        vals.push(brand); }
@@ -39,7 +39,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
     if (!name || !sku || !min_price)
       return res.status(400).json({ error: 'name, sku, min_price are required' });
 
-    const [result] = await db.query(
+    const [rows] = await db.query(
       `INSERT INTO products (name, brand, brand_id, sub_type_id, top_type, category, size, sku, stock, min_price, color, photo_url)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -61,10 +61,10 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
     await log(req.user.id, req.user.name, req.user.role, 'product_added', `${name} Sz${size}`,
       `SKU: ${sku}, Stock: ${stock}, Min: ${min_price}`, 'inventory', req.ip);
 
-    res.status(201).json({ id: result.insertId, message: 'Product created' });
+    res.status(201).json({ id: rows[0].id, message: 'Product created' });
   } catch (err) {
     console.error('[products] POST /:', err.message, err.stack);
-    if (err.code === 'ER_DUP_ENTRY')
+    if (err.code === '23505')
       return res.status(409).json({ error: 'SKU already exists' });
     res.status(500).json({ error: 'Failed to create product' });
   }
@@ -120,7 +120,7 @@ router.delete('/:id', requireAuth, ADMIN, async (req, res) => {
     const [[p]]  = await db.query('SELECT name, size FROM products WHERE id = ?', [id]);
     if (!p) return res.status(404).json({ error: 'Product not found' });
 
-    await db.query('UPDATE products SET is_active = 0 WHERE id = ?', [id]);
+    await db.query('UPDATE products SET is_active = false WHERE id = ?', [id]);
     await log(req.user.id, req.user.name, req.user.role, 'product_deleted', `${p.name} Sz${p.size}`,
       'Removed from inventory', 'inventory', req.ip);
 
@@ -144,7 +144,7 @@ router.post('/bulk-import', requireAuth, ADMIN, async (req, res) => {
       await db.query(
         `INSERT INTO products (name, brand, brand_id, sub_type_id, top_type, category, size, sku, stock, min_price, color)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE stock = VALUES(stock), min_price = VALUES(min_price)`,
+         ON CONFLICT (sku) DO UPDATE SET stock = EXCLUDED.stock, min_price = EXCLUDED.min_price`,
         [p.name, p.brand || 'Other', p.brand_id || null, p.sub_type_id || null,
          p.top_type || 'shoes', p.category || 'Lifestyle', p.size || '', p.sku,
          p.stock || 0, p.min_price, p.color || '']

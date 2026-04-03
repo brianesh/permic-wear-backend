@@ -101,10 +101,10 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       `INSERT INTO mpesa_transactions
          (sale_id, checkout_request_id, merchant_request_id, phone, amount)
        VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         merchant_request_id = VALUES(merchant_request_id),
-         phone = VALUES(phone),
-         amount = VALUES(amount),
+       ON CONFLICT (checkout_request_id) DO UPDATE SET
+         merchant_request_id = EXCLUDED.merchant_request_id,
+         phone = EXCLUDED.phone,
+         amount = EXCLUDED.amount,
          status = 'pending',
          initiated_at = NOW()`,
       [sale_id, mpesaResp.CheckoutRequestID, mpesaResp.MerchantRequestID, phone, amount]

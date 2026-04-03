@@ -36,7 +36,7 @@ router.get('/summary', requireAuth, ADMIN, async (req, res) => {
     `);
 
     const [[lowStockRow]] = await db.query(
-      `SELECT COUNT(*) AS count FROM products WHERE is_active = 1 AND stock <= 5`
+      `SELECT COUNT(*) AS count FROM products WHERE is_active = true AND stock <= 5`
     ).catch(() => [[{ count: 0 }]]);
 
     const prevRev   = parseFloat(yesterday.revenue) || 1;

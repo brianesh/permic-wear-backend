@@ -105,7 +105,7 @@ router.post('/setup', async (req, res) => {
     const hash   = await bcrypt.hash(password, 12);
     const avatar = name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
 
-    const [result] = await db.query(
+    const [rows] = await db.query(
       `INSERT INTO users (name, email, password_hash, role, avatar, status, commission_rate)
        VALUES (?, ?, ?, 'super_admin', ?, 'active', 10)`,
       [name, email.trim().toLowerCase(), hash, avatar]
@@ -130,13 +130,13 @@ router.post('/setup', async (req, res) => {
     for (const [key, val] of defaults) {
       await db.query(
         `INSERT INTO settings (key_name, key_value, updated_by) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE key_value = VALUES(key_value)`,
-        [key, val, result.insertId]
+         ON CONFLICT (key_name) DO UPDATE SET key_value = EXCLUDED.key_value`,
+        [key, val, rows[0].id]
       );
     }
 
     const token = jwt.sign(
-      { id: result.insertId, role: 'super_admin' },
+      { id: rows[0].id, role: 'super_admin' },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
     );
@@ -146,11 +146,11 @@ router.post('/setup', async (req, res) => {
     res.status(201).json({
       message: 'Setup complete. Super admin account created.',
       token,
-      user: { id: result.insertId, name, email, role: 'super_admin', avatar, status: 'active', commission_rate: 10 },
+      user: { id: rows[0].id, name, email, role: 'super_admin', avatar, status: 'active', commission_rate: 10 },
     });
   } catch (err) {
     console.error('[SETUP] Error:', err.message);
-    if (err.code === 'ER_DUP_ENTRY')
+    if (err.code === '23505')
       return res.status(409).json({ error: 'Email already in use' });
     res.status(500).json({ error: 'Setup failed' });
   }

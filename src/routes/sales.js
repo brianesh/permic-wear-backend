@@ -36,7 +36,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     for (const item of items) {
       const [[product]] = await conn.query(
-        'SELECT * FROM products WHERE id = ? AND is_active = 1 FOR UPDATE',
+        'SELECT * FROM products WHERE id = ? AND is_active = true FOR UPDATE',
         [item.product_id]
       );
       if (!product)
@@ -93,7 +93,7 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     // Insert sale
-    const [saleResult] = await conn.query(
+    const [saleRows] = await conn.query(
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
           change_given, extra_profit, commission, commission_rate, mpesa_phone, status)
@@ -102,7 +102,7 @@ router.post('/', requireAuth, async (req, res) => {
        changeGiven, extraProfit, totalCommission, commissionRate,
        mpesa_phone || null, saleStatus]
     );
-    const saleId = saleResult.insertId;
+    const saleId = saleRows[0].id;
 
     // Insert line items
     for (const li of lineItems) {
