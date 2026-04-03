@@ -94,8 +94,6 @@ app.use('/api/logs',       logsRoutes);
 app.use('/api/settings',   settingsRoutes);
 app.use('/api/categories', categoryRoutes);
 
-app.use('/api/auth', authRouter);
-
 // ── 404 ───────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: `Not found: ${req.method} ${req.path}` }));
 
