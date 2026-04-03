@@ -186,7 +186,7 @@ async function checkAndAlertStock(db, lowThreshold, agingDays, adminPhone) {
 
   // Send email
   if (opts.emailEnabled && opts.adminEmail) {
-    await sendEmail(opts.adminEmail, '\u26a0 Permic Men's Wear Stock Alert', message)
+    await sendEmail(opts.adminEmail, "⚠ Permic Men's Wear Stock Alert", message)
       .catch(e => console.error('[EMAIL Alert] Error:', e.message));
   }
 }
