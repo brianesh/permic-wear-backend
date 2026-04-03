@@ -249,10 +249,22 @@ router.get('/', requireAuth, async (req, res) => {
 
     sql += ' ORDER BY s.sale_date DESC';
 
-    // Count total
-    const [countRows] = await db.query(
-      sql.replace('SELECT s.*, u.name AS cashier_name, u.role AS cashier_role', 'SELECT COUNT(*) AS total'), vals
-    );
+    // Count total - build a separate count query to avoid GROUP BY issues
+    let countSql = 'SELECT COUNT(*) AS total FROM sales s JOIN users u ON s.cashier_id = u.id WHERE 1=1';
+    const countVals = [];
+    
+    if (isCashier) {
+      countSql += ' AND s.cashier_id = ?';
+      countVals.push(req.user.id);
+    } else if (cashier_id) {
+      countSql += ' AND s.cashier_id = ?';
+      countVals.push(cashier_id);
+    }
+    if (from)       { countSql += ' AND DATE(s.sale_date) >= ?'; countVals.push(from); }
+    if (to)         { countSql += ' AND DATE(s.sale_date) <= ?'; countVals.push(to);   }
+    if (method)     { countSql += ' AND s.payment_method = ?';    countVals.push(method); }
+
+    const [countRows] = await db.query(countSql, countVals);
     const total = countRows[0].total;
 
     // Paginate
