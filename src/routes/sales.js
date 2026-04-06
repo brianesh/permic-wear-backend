@@ -157,16 +157,21 @@ router.get('/', requireAuth, async (req, res) => {
     let   idx    = 1;
     const push   = v => { vals.push(v); return `$${idx++}`; };
 
-    // Store scoping — super_admin can filter by store; admin/cashier see only their store
+    // Store scoping — super_admin and admin can see all sales; cashiers see only their own
+    // Super admin can optionally filter by a specific store
     if (req.user.role === 'super_admin' && store_id) {
       where += ` AND s.store_id = ${push(store_id)}`;
-    } else if (req.user.role !== 'super_admin') {
+    } else if (isCashier) {
+      // Cashiers only see their own sales
+      where += ` AND s.cashier_id = ${push(req.user.id)}`;
+    } else if (req.user.role === 'admin' && req.user.store_id) {
+      // Admin sees all sales from their store
       where += ` AND s.store_id = ${push(req.user.store_id)}`;
     }
+    // Super admin without store_id filter sees ALL sales (no where clause added)
 
-    if (isCashier) {
-      where += ` AND s.cashier_id = ${push(req.user.id)}`;
-    } else if (cashier_id) {
+    // Cashier filter (for admin/super_admin viewing other cashiers' sales)
+    if (!isCashier && cashier_id) {
       where += ` AND s.cashier_id = ${push(cashier_id)}`;
     }
 
