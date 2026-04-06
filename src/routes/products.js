@@ -11,6 +11,7 @@ const express = require('express');
 const db      = require('../db/connection');
 const { log } = require('../services/logger');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { generateVariants, previewVariants, validateProductInput, prepareBulkInsert } = require('../services/variantGenerator');
 
 const router = express.Router();
 const ADMIN  = requireRole('super_admin', 'admin');
@@ -288,6 +289,159 @@ router.post('/bulk-import', requireAuth, ADMIN, async (req, res) => {
   } catch (err) {
     console.error('[products] bulk-import:', err.message);
     res.status(500).json({ error: 'Bulk import failed' });
+  }
+});
+
+// ── POST /api/products/preview-variants ───────────────────────────────────────
+// Preview variants without database lookup (for UI preview before creation)
+router.post('/preview-variants', requireAuth, ADMIN, async (req, res) => {
+  try {
+    const product = req.body;
+
+    // Validate input
+    const validation = validateProductInput(product);
+    if (!validation.valid) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        details: validation.errors
+      });
+    }
+
+    // Generate preview variants (without DB uniqueness check)
+    const variants = previewVariants(product);
+
+    res.json({
+      count: variants.length,
+      variants: variants,
+      warnings: validation.warnings
+    });
+  } catch (err) {
+    console.error('[products] preview-variants:', err.message);
+    res.status(500).json({ error: 'Failed to preview variants' });
+  }
+});
+
+// ── POST /api/products/bulk-create ────────────────────────────────────────────
+// Create multiple product variants (color × size combinations) with auto-generated SKUs
+router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
+  try {
+    const product = req.body;
+
+    // Validate input
+    const validation = validateProductInput(product);
+    if (!validation.valid) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        details: validation.errors
+      });
+    }
+
+    // Look up brand_id and sub_type_id from database
+    let brandId = product.brand_id || null;
+    let subTypeId = product.sub_type_id || null;
+
+    // If brand name is provided but not brand_id, look it up
+    if (!brandId && product.brand) {
+      const { rows: [brandRow] } = await db.query(
+        'SELECT id FROM brands WHERE name = $1 AND top_type = $2 LIMIT 1',
+        [product.brand, product.topType || product.top_type || 'shoes']
+      );
+      if (brandRow) brandId = brandRow.id;
+    }
+
+    // If subType name is provided but not sub_type_id, look it up
+    if (!subTypeId && product.subType) {
+      const { rows: [subTypeRow] } = await db.query(
+        'SELECT id FROM sub_types WHERE name = $1 AND brand_id = $2 LIMIT 1',
+        [product.subType, brandId]
+      );
+      if (subTypeRow) subTypeId = subTypeRow.id;
+    }
+
+    // Determine store_id
+    const storeId = req.user.role === 'super_admin'
+      ? (product.store_id || null)
+      : req.user.store_id;
+
+    // Generate all variants with unique SKUs
+    const variants = await generateVariants(db, {
+      name: product.name,
+      brand: product.brand,
+      brand_id: brandId,
+      subType: product.subType,
+      sub_type_id: subTypeId,
+      colors: product.colors || [],
+      sizes: product.sizes || [],
+      minPrice: product.min_price || product.minPrice,
+      stock: product.stock || 0,
+      category: product.category,
+      topType: product.topType || product.top_type || 'shoes',
+      distributeStock: product.distributeStock || false,
+    });
+
+    if (!variants.length) {
+      return res.status(400).json({ error: 'No variants generated' });
+    }
+
+    // Insert all variants into database
+    const insertedIds = [];
+    const errors = [];
+
+    for (const variant of variants) {
+      try {
+        const { rows } = await db.query(`
+          INSERT INTO products
+            (name, brand, brand_id, sub_type_id, top_type, category,
+             size, sku, stock, min_price, color, store_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          ON CONFLICT (sku) DO UPDATE SET
+            stock = EXCLUDED.stock,
+            min_price = EXCLUDED.min_price,
+            brand_id = EXCLUDED.brand_id,
+            sub_type_id = EXCLUDED.sub_type_id
+          RETURNING id
+        `, [
+          variant.name,
+          variant.brand,
+          variant.brand_id || brandId,
+          variant.sub_type_id || subTypeId,
+          variant.topType,
+          variant.category,
+          variant.size,
+          variant.sku,
+          variant.stock,
+          variant.minPrice,
+          variant.color,
+          storeId
+        ]);
+
+        insertedIds.push(rows[0].id);
+      } catch (err) {
+        if (err.code === '23505') {
+          errors.push(`SKU ${variant.sku} already exists`);
+        } else {
+          errors.push(`Error creating ${variant.color} ${variant.size}: ${err.message}`);
+        }
+      }
+    }
+
+    // Log the bulk creation
+    await log(req.user.id, req.user.name, req.user.role, 'bulk_product_created',
+      `${product.name}`,
+      `Created ${insertedIds.length} variants (${variants.length} requested)`,
+      'inventory', req.ip);
+
+    res.json({
+      message: `Created ${insertedIds.length} of ${variants.length} variants`,
+      created: insertedIds.length,
+      total: variants.length,
+      errors: errors.length > 0 ? errors : undefined,
+      warnings: validation.warnings,
+      ids: insertedIds
+    });
+  } catch (err) {
+    console.error('[products] bulk-create:', err.message);
+    res.status(500).json({ error: 'Bulk creation failed' });
   }
 });
 

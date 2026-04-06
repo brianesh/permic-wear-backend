@@ -161,6 +161,30 @@ router.post('/stk-push', requireAuth, async (req, res) => {
 
     const tumaResp = await stkPush(phone, amount, sale.txn_id);
 
+    // Handle different Tuma API response formats
+    // The checkout_request_id might be nested under 'data' or have different casing
+    const checkoutRequestId = tumaResp.checkout_request_id 
+      || tumaResp.checkoutRequestID 
+      || tumaResp.CheckoutRequestID
+      || (tumaResp.data && tumaResp.data.checkout_request_id)
+      || (tumaResp.data && tumaResp.data.checkoutRequestID)
+      || (tumaResp.response && tumaResp.response.checkout_request_id);
+
+    const merchantRequestId = tumaResp.merchant_request_id 
+      || tumaResp.merchantRequestID 
+      || tumaResp.MerchantRequestID
+      || (tumaResp.data && tumaResp.data.merchant_request_id)
+      || (tumaResp.data && tumaResp.data.merchantRequestID);
+
+    if (!checkoutRequestId) {
+      console.error('[Tuma] No checkout_request_id in response:', JSON.stringify(tumaResp, null, 2));
+      return res.status(502).json({
+        error: 'Invalid response from Tuma API: missing checkout_request_id',
+        code: 'TUMA_INVALID_RESPONSE',
+        debug: process.env.NODE_ENV === 'development' ? tumaResp : undefined
+      });
+    }
+
     await db.query(
       `INSERT INTO tuma_transactions
          (sale_id, checkout_request_id, merchant_request_id, phone, amount)
@@ -168,7 +192,7 @@ router.post('/stk-push', requireAuth, async (req, res) => {
        ON CONFLICT (checkout_request_id) DO UPDATE SET
          merchant_request_id=EXCLUDED.merchant_request_id, phone=EXCLUDED.phone,
          amount=EXCLUDED.amount, status='pending', initiated_at=NOW()`,
-      [sale_id, tumaResp.checkout_request_id, tumaResp.merchant_request_id, fmtPhone, amount]
+      [sale_id, checkoutRequestId, merchantRequestId, fmtPhone, amount]
     );
 
     await log(req.user.id, req.user.name, req.user.role, 'tuma_stk_sent',
