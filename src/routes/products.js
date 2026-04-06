@@ -1,3 +1,12 @@
+/**
+ * products.js — Products with multi-store scoping + fast autocomplete
+ *
+ * GET /api/products          — list products (scoped to user's store)
+ * GET /api/products/search   — fast autocomplete (returns up to 12 results)
+ * GET /api/products/favorites — cashier's most-used products
+ * POST /api/products/favorites/:id — record a product was used (for ranking)
+ */
+
 const express = require('express');
 const db      = require('../db/connection');
 const { log } = require('../services/logger');
@@ -6,190 +15,279 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 const ADMIN  = requireRole('super_admin', 'admin');
 
-// GET /api/products
+// ── Helpers ───────────────────────────────────────────────────────────────────
+// Build a store filter clause — super_admin with no store_id sees all
+function storeFilter(user, paramOffset = 1) {
+  if (user.role === 'super_admin' && !user.store_id) return { clause: '', vals: [], next: paramOffset };
+  const storeId = user.store_id;
+  return {
+    clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
+    vals: [storeId],
+    next: paramOffset + 1,
+  };
+}
+
+// ── GET /api/products — full list with filters ─────────────────────────────────
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { brand, brand_id, sub_type_id, top_type, category, search } = req.query;
-    let sql    = 'SELECT * FROM products WHERE is_active = true';
+    const { brand, brand_id, sub_type_id, top_type, category, search, in_stock } = req.query;
+
+    let sql  = 'SELECT p.* FROM products p WHERE p.is_active = TRUE';
     const vals = [];
+    let idx  = 1;
 
-    if (brand      && brand      !== 'All') { sql += ' AND brand = ?';        vals.push(brand); }
-    if (brand_id)                           { sql += ' AND brand_id = ?';     vals.push(brand_id); }
-    if (sub_type_id)                        { sql += ' AND sub_type_id = ?';  vals.push(sub_type_id); }
-    if (top_type)                           { sql += ' AND top_type = ?';     vals.push(top_type); }
-    if (category   && category   !== 'All') { sql += ' AND category = ?';     vals.push(category); }
+    // Store scoping
+    const sf = storeFilter(req.user, idx);
+    if (sf.clause) { sql += sf.clause; vals.push(...sf.vals); idx = sf.next; }
+
+    if (brand      && brand    !== 'All') { sql += ` AND p.brand = $${idx++}`;        vals.push(brand); }
+    if (brand_id)                          { sql += ` AND p.brand_id = $${idx++}`;    vals.push(brand_id); }
+    if (sub_type_id)                       { sql += ` AND p.sub_type_id = $${idx++}`; vals.push(sub_type_id); }
+    if (top_type)                          { sql += ` AND p.top_type = $${idx++}`;    vals.push(top_type); }
+    if (category   && category !== 'All') { sql += ` AND p.category = $${idx++}`;     vals.push(category); }
+    if (in_stock === 'true')               { sql += ` AND p.stock > 0`; }
+
     if (search) {
-      sql += ' AND (name LIKE ? OR sku LIKE ? OR color LIKE ?)';
-      vals.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      sql += ` AND (p.name ILIKE $${idx} OR p.brand ILIKE $${idx} OR p.sku ILIKE $${idx} OR p.color ILIKE $${idx})`;
+      vals.push(`%${search}%`);
+      idx++;
     }
-    sql += ' ORDER BY brand, name, size';
 
-    const [rows] = await db.query(sql, vals);
+    sql += ' ORDER BY p.brand, p.name, p.size';
+
+    const { rows } = await db.query(sql, vals);
     res.json(rows);
   } catch (err) {
-    console.error('[products] GET /:', err.message, err.stack);
+    console.error('[products] GET /:', err.message);
     res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
 
-// POST /api/products
+// ── GET /api/products/search — autocomplete (fast, max 15 results) ─────────────
+// Returns products ranked: favorites first, then by name match
+router.get('/search', requireAuth, async (req, res) => {
+  try {
+    const { q, top_type, in_stock } = req.query;
+    if (!q || q.trim().length < 1) return res.json([]);
+
+    const term    = q.trim();
+    const like    = `%${term}%`;
+    const userId  = req.user.id;
+    const vals    = [like, userId];
+    let   idx     = 3;
+
+    let storeSql = '';
+    if (req.user.store_id) {
+      storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
+      vals.push(req.user.store_id);
+      idx++;
+    }
+
+    let topTypeSql = '';
+    if (top_type) {
+      topTypeSql = ` AND p.top_type = $${idx}`;
+      vals.push(top_type);
+      idx++;
+    }
+
+    let inStockSql = '';
+    if (in_stock === 'true') inStockSql = ' AND p.stock > 0';
+
+    // Rank: exact name start > brand match > anywhere; favorites bubble up
+    const { rows } = await db.query(`
+      SELECT
+        p.*,
+        COALESCE(pf.use_count, 0) AS fav_count,
+        CASE
+          WHEN p.name  ILIKE $1 THEN 3
+          WHEN p.brand ILIKE $1 THEN 2
+          ELSE 1
+        END AS match_rank
+      FROM products p
+      LEFT JOIN product_favorites pf ON pf.product_id = p.id AND pf.user_id = $2
+      WHERE p.is_active = TRUE
+        AND (p.name ILIKE $1 OR p.brand ILIKE $1 OR p.sku ILIKE $1
+             OR p.color ILIKE $1 OR p.category ILIKE $1)
+        ${storeSql}${topTypeSql}${inStockSql}
+      ORDER BY fav_count DESC, match_rank DESC, p.name ASC
+      LIMIT 15
+    `, vals);
+
+    res.json(rows);
+  } catch (err) {
+    console.error('[products] /search:', err.message);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+// ── GET /api/products/favorites — top 12 for this cashier ─────────────────────
+router.get('/favorites', requireAuth, async (req, res) => {
+  try {
+    const { top_type } = req.query;
+    const vals = [req.user.id];
+    let idx = 2;
+    let topTypeSql = '';
+    if (top_type) { topTypeSql = ` AND p.top_type = $${idx}`; vals.push(top_type); idx++; }
+
+    let storeSql = '';
+    if (req.user.store_id) {
+      storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
+      vals.push(req.user.store_id);
+    }
+
+    const { rows } = await db.query(`
+      SELECT p.*, pf.use_count, pf.last_used
+      FROM product_favorites pf
+      JOIN products p ON p.id = pf.product_id
+      WHERE pf.user_id = $1
+        AND p.is_active = TRUE
+        AND p.stock > 0
+        ${topTypeSql}${storeSql}
+      ORDER BY pf.use_count DESC, pf.last_used DESC
+      LIMIT 12
+    `, vals);
+
+    res.json(rows);
+  } catch (err) {
+    console.error('[products] /favorites:', err.message);
+    res.status(500).json({ error: 'Failed to load favorites' });
+  }
+});
+
+// ── POST /api/products/favorites/:id — record product used in a sale ───────────
+router.post('/favorites/:id', requireAuth, async (req, res) => {
+  try {
+    await db.query(`
+      INSERT INTO product_favorites (user_id, product_id, use_count, last_used)
+      VALUES ($1, $2, 1, NOW())
+      ON CONFLICT (user_id, product_id) DO UPDATE
+        SET use_count = product_favorites.use_count + 1,
+            last_used = NOW()
+    `, [req.user.id, req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    // Non-critical — don't fail the sale
+    console.warn('[products] favorites upsert:', err.message);
+    res.json({ ok: false });
+  }
+});
+
+// ── POST /api/products ─────────────────────────────────────────────────────────
 router.post('/', requireAuth, ADMIN, async (req, res) => {
   try {
-    const { name, brand, brand_id, sub_type_id, top_type, category, size, sku, stock, min_price, color, photo_url } = req.body;
+    const { name, brand, brand_id, sub_type_id, top_type, category,
+            size, sku, stock, min_price, color, photo_url } = req.body;
     if (!name || !sku || !min_price)
       return res.status(400).json({ error: 'name, sku, min_price are required' });
 
-    const [rows] = await db.query(
-      `INSERT INTO products (name, brand, brand_id, sub_type_id, top_type, category, size, sku, stock, min_price, color, photo_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        name,
-        brand       || 'Other',
-        brand_id    || null,
-        sub_type_id || null,
-        top_type    || 'shoes',
-        category    || 'Lifestyle',
-        size        || '',
-        sku,
-        stock       || 0,
-        min_price,
-        color       || '',
-        photo_url   || null,
-      ]
-    );
+    const storeId = req.user.role === 'super_admin'
+      ? (req.body.store_id || null)  // super_admin can set global (null) or specific
+      : req.user.store_id;
 
-    await log(req.user.id, req.user.name, req.user.role, 'product_added', `${name} Sz${size}`,
-      `SKU: ${sku}, Stock: ${stock}, Min: ${min_price}`, 'inventory', req.ip);
+    const { rows } = await db.query(`
+      INSERT INTO products
+        (name, brand, brand_id, sub_type_id, top_type, category,
+         size, sku, stock, min_price, color, photo_url, store_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      RETURNING id
+    `, [name, brand||'Other', brand_id||null, sub_type_id||null,
+        top_type||'shoes', category||'Lifestyle', size||'', sku,
+        stock||0, min_price, color||'', photo_url||null, storeId]);
+
+    await log(req.user.id, req.user.name, req.user.role, 'product_added',
+      `${name} Sz${size}`, `SKU: ${sku}, Stock: ${stock}, Min: ${min_price}`, 'inventory', req.ip);
 
     res.status(201).json({ id: rows[0].id, message: 'Product created' });
   } catch (err) {
-    console.error('[products] POST /:', err.message, err.stack);
-    if (err.code === '23505')
-      return res.status(409).json({ error: 'SKU already exists' });
+    console.error('[products] POST /:', err.message);
+    if (err.code === '23505') return res.status(409).json({ error: 'SKU already exists' });
     res.status(500).json({ error: 'Failed to create product' });
   }
 });
 
-// PUT /api/products/:id
+// ── PUT /api/products/:id ──────────────────────────────────────────────────────
 router.put('/:id', requireAuth, ADMIN, async (req, res) => {
   try {
-    const { id }  = req.params;
-    const { name, brand, brand_id, sub_type_id, top_type, category, size, sku, stock, min_price, color, photo_url } = req.body;
+    const { id } = req.params;
+    const { name, brand, brand_id, sub_type_id, top_type, category,
+            size, sku, stock, min_price, color, photo_url } = req.body;
 
-    const [[old]] = await db.query('SELECT * FROM products WHERE id = ?', [id]);
+    const { rows: [old] } = await db.query('SELECT * FROM products WHERE id = $1', [id]);
     if (!old) return res.status(404).json({ error: 'Product not found' });
 
-    await db.query(
-      `UPDATE products SET name=?, brand=?, brand_id=?, sub_type_id=?, top_type=?, category=?, size=?, sku=?, stock=?, min_price=?, color=?, photo_url=?
-       WHERE id = ?`,
-      [
-        name        ?? old.name,
-        brand       ?? old.brand,
-        brand_id    !== undefined ? brand_id    : old.brand_id,
-        sub_type_id !== undefined ? sub_type_id : old.sub_type_id,
-        top_type    ?? old.top_type,
-        category    ?? old.category,
-        size        ?? old.size,
-        sku         ?? old.sku,
-        stock       !== undefined ? stock : old.stock,
-        min_price   ?? old.min_price,
-        color       !== undefined ? color : old.color,
-        photo_url   !== undefined ? photo_url : old.photo_url,
-        id,
-      ]
-    );
+    await db.query(`
+      UPDATE products SET name=$1,brand=$2,brand_id=$3,sub_type_id=$4,top_type=$5,
+        category=$6,size=$7,sku=$8,stock=$9,min_price=$10,color=$11,photo_url=$12
+      WHERE id=$13
+    `, [name??old.name, brand??old.brand, brand_id!==undefined?brand_id:old.brand_id,
+        sub_type_id!==undefined?sub_type_id:old.sub_type_id,
+        top_type??old.top_type, category??old.category, size??old.size, sku??old.sku,
+        stock!==undefined?stock:old.stock, min_price??old.min_price,
+        color!==undefined?color:old.color, photo_url!==undefined?photo_url:old.photo_url, id]);
 
     const changes = [];
     if (stock !== undefined && stock !== old.stock) changes.push(`Stock: ${old.stock}→${stock}`);
-    if (min_price !== undefined && min_price !== old.min_price) changes.push(`MinPrice: ${old.min_price}→${min_price}`);
+    if (min_price !== undefined && min_price !== old.min_price) changes.push(`Price: ${old.min_price}→${min_price}`);
 
-    await log(req.user.id, req.user.name, req.user.role, 'product_edited', `${old.name} Sz${old.size}`,
-      changes.length ? changes.join(', ') : 'Details updated', 'inventory', req.ip);
+    await log(req.user.id, req.user.name, req.user.role, 'product_edited',
+      `${old.name} Sz${old.size}`, changes.join(', ')||'Details updated', 'inventory', req.ip);
 
     res.json({ message: 'Product updated' });
   } catch (err) {
-    console.error('[products] PUT /:id:', err.message, err.stack);
+    console.error('[products] PUT /:id:', err.message);
     res.status(500).json({ error: 'Failed to update product' });
   }
 });
 
-// DELETE /api/products/:id  (soft delete)
+// ── DELETE /api/products/:id — soft delete ─────────────────────────────────────
 router.delete('/:id', requireAuth, ADMIN, async (req, res) => {
   try {
     const { id } = req.params;
-    const [[p]]  = await db.query('SELECT name, size FROM products WHERE id = ?', [id]);
+    const { rows: [p] } = await db.query('SELECT name, size FROM products WHERE id = $1', [id]);
     if (!p) return res.status(404).json({ error: 'Product not found' });
 
-    await db.query('UPDATE products SET is_active = false WHERE id = ?', [id]);
-    await log(req.user.id, req.user.name, req.user.role, 'product_deleted', `${p.name} Sz${p.size}`,
-      'Removed from inventory', 'inventory', req.ip);
+    await db.query('UPDATE products SET is_active = FALSE WHERE id = $1', [id]);
+    await log(req.user.id, req.user.name, req.user.role, 'product_deleted',
+      `${p.name} Sz${p.size}`, 'Removed from inventory', 'inventory', req.ip);
 
     res.json({ message: 'Product removed' });
   } catch (err) {
-    console.error('[products] DELETE /:id:', err.message, err.stack);
+    console.error('[products] DELETE /:id:', err.message);
     res.status(500).json({ error: 'Failed to delete product' });
   }
 });
 
-// POST /api/products/bulk-import
+// ── POST /api/products/bulk-import ────────────────────────────────────────────
 router.post('/bulk-import', requireAuth, ADMIN, async (req, res) => {
   try {
     const { products } = req.body;
     if (!Array.isArray(products) || !products.length)
       return res.status(400).json({ error: 'products array required' });
 
+    const storeId = req.user.role === 'super_admin' ? (req.body.store_id || null) : req.user.store_id;
     let imported = 0;
+
     for (const p of products) {
       if (!p.name || !p.sku || !p.min_price) continue;
-      await db.query(
-        `INSERT INTO products (name, brand, brand_id, sub_type_id, top_type, category, size, sku, stock, min_price, color)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (sku) DO UPDATE SET stock = EXCLUDED.stock, min_price = EXCLUDED.min_price`,
-        [p.name, p.brand || 'Other', p.brand_id || null, p.sub_type_id || null,
-         p.top_type || 'shoes', p.category || 'Lifestyle', p.size || '', p.sku,
-         p.stock || 0, p.min_price, p.color || '']
-      );
+      await db.query(`
+        INSERT INTO products (name, brand, brand_id, sub_type_id, top_type, category,
+                              size, sku, stock, min_price, color, store_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (sku) DO UPDATE SET
+          stock = EXCLUDED.stock, min_price = EXCLUDED.min_price
+      `, [p.name, p.brand||'Other', p.brand_id||null, p.sub_type_id||null,
+          p.top_type||'shoes', p.category||'Lifestyle', p.size||'', p.sku,
+          p.stock||0, p.min_price, p.color||'', storeId]);
       imported++;
     }
 
-    await log(req.user.id, req.user.name, req.user.role, 'csv_import', `${imported} products`,
-      'Bulk imported via CSV', 'inventory', req.ip);
+    await log(req.user.id, req.user.name, req.user.role, 'csv_import',
+      `${imported} products`, 'Bulk import', 'inventory', req.ip);
 
     res.json({ message: `${imported} products imported` });
   } catch (err) {
-    console.error('[products] bulk-import:', err.message, err.stack);
+    console.error('[products] bulk-import:', err.message);
     res.status(500).json({ error: 'Bulk import failed' });
-  }
-});
-
-// POST /api/products/send-alert
-router.post('/send-alert', requireAuth, async (req, res) => {
-  try {
-    const [[adminPhoneRow]] = await db.query(
-      "SELECT key_value FROM settings WHERE key_name = 'admin_phone'"
-    ).catch(() => [[{ key_value: null }]]);
-    const [[lowThreshRow]] = await db.query(
-      "SELECT key_value FROM settings WHERE key_name = 'low_stock_threshold'"
-    ).catch(() => [[{ key_value: 5 }]]);
-    const [[agingRow]] = await db.query(
-      "SELECT key_value FROM settings WHERE key_name = 'aging_days'"
-    ).catch(() => [[{ key_value: 60 }]]);
-
-    const adminPhone = adminPhoneRow?.key_value || process.env.ADMIN_PHONE;
-    if (adminPhone) {
-      const { checkAndAlertStock } = require('../services/sms');
-      await checkAndAlertStock(db, parseInt(lowThreshRow?.key_value||5), parseInt(agingRow?.key_value||60), adminPhone);
-    }
-
-    await require('../services/logger').log(
-      req.user.id, req.user.name, req.user.role,
-      'stock_alert_sent', 'Admin', `Alert sent by ${req.user.name}`, 'inventory', req.ip
-    );
-
-    res.json({ message: 'Alert sent' });
-  } catch (err) {
-    console.error('[products] send-alert:', err.message, err.stack);
-    res.status(500).json({ error: 'Failed to send alert' });
   }
 });
 
