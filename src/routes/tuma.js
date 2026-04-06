@@ -220,6 +220,18 @@ const handleTumaCallback = async (req, res) => {
     const paymentRef  = body?.mpesa_receipt_number || '';
     const failReason  = body?.failure_reason   || '';
 
+    // Extract additional customer information if available
+    // Tuma/M-Pesa may provide: msisdn, firstname, middlename, lastname, bank name, etc.
+    const customerPhone = body?.msisdn || body?.phone || body?.phone_number || body?.Msisdn || '';
+    const firstName     = body?.firstname || body?.FirstName || body?.first_name || '';
+    const middleName    = body?.middlename || body?.MiddleName || body?.middle_name || '';
+    const lastName      = body?.lastname || body?.LastName || body?.last_name || '';
+    const bankName      = body?.bank_name || body?.BankName || body?.bank || body?.Bank || '';
+    const accountNumber = body?.account_number || body?.AccountNumber || body?.account || '';
+
+    // Build full customer name if available
+    const customerName = [firstName, middleName, lastName].filter(Boolean).join(' ') || '';
+
     console.log('[Tuma Callback]', JSON.stringify(body, null, 2));
     if (!checkoutId) return;
 
