@@ -81,14 +81,18 @@ async function getTumaToken() {
       api_key: creds.apiKey,
     }, { timeout: 10000 });
 
-    if (res.data.success && res.data.token) {
-      _cachedToken = res.data.token;
+    // Tuma API returns different response formats - check for token in multiple places
+    const token = res.data.token || res.data.access_token || res.data.data?.token;
+    const message = res.data.message || res.data.msg;
+    
+    if (token) {
+      _cachedToken = token;
       // Token expires in 24 hours (86400 seconds), cache for 23 hours to be safe
       _tokenExpiresAt = Date.now() + (23 * 3600 * 1000);
       console.log('[Tuma] Got JWT token, expires in 23 hours');
       return _cachedToken;
     } else {
-      throw new Error(res.data.message || 'Failed to get token');
+      throw new Error(message || 'Failed to get token');
     }
   } catch (err) {
     const msg = err.response?.data?.message || err.response?.data?.error || err.message;
