@@ -56,11 +56,36 @@ router.get('/', requireAuth, async (req, res) => {
 
     sql += ' ORDER BY p.brand, p.name, p.size';
 
+    console.log('[products] Query:', sql, 'Vals:', vals);
     const { rows } = await db.query(sql, vals);
+    console.log('[products] Found', rows.length, 'products');
     res.json(rows);
   } catch (err) {
     console.error('[products] GET /:', err.message);
     res.status(500).json({ error: 'Failed to fetch products' });
+  }
+});
+
+// ── GET /api/products/debug — debug endpoint to check products table ────────────
+router.get('/debug', requireAuth, async (req, res) => {
+  try {
+    // Check total products count
+    const { rows: [total] } = await db.query('SELECT COUNT(*) as count FROM products');
+    const { rows: [active] } = await db.query('SELECT COUNT(*) as count FROM products WHERE is_active = TRUE');
+    const { rows: [inactive] } = await db.query('SELECT COUNT(*) as count FROM products WHERE is_active = FALSE OR is_active IS NULL');
+    const { rows: sample } = await db.query('SELECT id, name, brand, size, stock, is_active, store_id FROM products ORDER BY id DESC LIMIT 5');
+
+    res.json({
+      total: parseInt(total.count),
+      active: parseInt(active.count),
+      inactive: parseInt(inactive.count),
+      sample: sample,
+      userStoreId: req.user.store_id,
+      userRole: req.user.role,
+    });
+  } catch (err) {
+    console.error('[products] debug:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
