@@ -18,7 +18,7 @@
 
 const express = require('express');
 const db      = require('../db/connection');
-const { stkPush, formatPhone, testCredentials } = require('./tuma');
+const { stkPush, formatPhone, testCredentials } = require('../services/tuma');
 const { log }  = require('../services/logger');
 const { sendSaleConfirmationSMS } = require('../services/sms');
 const { requireAuth, requireRole } = require('../middleware/auth');

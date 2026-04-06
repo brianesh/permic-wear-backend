@@ -211,3 +211,32 @@ INSERT INTO settings (key_name, key_value) VALUES
   ('email_alerts','true'),
   ('mpesa_env','production')
 ON CONFLICT (key_name) DO NOTHING;
+
+-- ── Tuma Payment Transactions ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS tuma_transactions (
+  id                  SERIAL PRIMARY KEY,
+  sale_id             INT          NOT NULL REFERENCES sales(id),
+  checkout_request_id VARCHAR(150) NOT NULL UNIQUE,
+  merchant_request_id VARCHAR(150),
+  phone               VARCHAR(20)  NOT NULL,
+  amount              DECIMAL(10,2) NOT NULL,
+  payment_ref         VARCHAR(100),
+  result_code         INT,
+  result_desc         VARCHAR(255),
+  status              VARCHAR(20)  NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','success','failed','timeout')),
+  initiated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  confirmed_at        TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_tuma_txn_checkout ON tuma_transactions(checkout_request_id);
+CREATE INDEX IF NOT EXISTS idx_tuma_txn_sale     ON tuma_transactions(sale_id);
+CREATE INDEX IF NOT EXISTS idx_tuma_txn_status   ON tuma_transactions(status);
+
+-- ── Tuma STK Cancellation Blocks (Mandatory Tuma policy) ──────────
+CREATE TABLE IF NOT EXISTS tuma_cancel_blocks (
+  phone                VARCHAR(20)  PRIMARY KEY,
+  consecutive_cancels  INT          NOT NULL DEFAULT 0,
+  last_cancel_at       TIMESTAMPTZ,
+  blocked_at           TIMESTAMPTZ
+);
