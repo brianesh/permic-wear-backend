@@ -104,7 +104,7 @@ async function testCredentials() {
   if (!creds.apiKey) {
     return {
       ok: false,
-      message: 'Tuma API key not set. Go to Settings → M-Pesa → Tuma section.',
+      message: 'Tuma API key not set. Go to Settings → Payment (Tuma) and enter your API key.',
       report: { apiKey: false, callbackUrl: creds.callbackUrl },
     };
   }
