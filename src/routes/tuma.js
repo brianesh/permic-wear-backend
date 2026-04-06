@@ -210,7 +210,8 @@ router.post('/stk-push', requireAuth, async (req, res) => {
 
 // ── POST /api/tuma/callback ───────────────────────────────────────
 // Tuma POSTs here. ACK immediately, process asynchronously.
-router.post('/callback', async (req, res) => {
+// Also supports GET for testing/debugging purposes.
+const handleTumaCallback = async (req, res) => {
   res.json({ success: true, message: 'Received' }); // fast ACK
 
   try {
@@ -263,7 +264,9 @@ router.post('/callback', async (req, res) => {
   } catch (err) {
     console.error('[Tuma Callback] Error:', err.message);
   }
-});
+};
+router.post('/callback', handleTumaCallback);
+router.get('/callback', handleTumaCallback);
 
 // ── GET /api/tuma/status/:id ──────────────────────────────────────
 router.get('/status/:checkoutRequestId', requireAuth, async (req, res) => {
