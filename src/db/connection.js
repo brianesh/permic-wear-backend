@@ -1,10 +1,6 @@
 /**
- * db/connection.js — PostgreSQL (Supabase) only
- * Normalised to match mysql2 [rows, fields] interface.
- * Automatically:
- *   - converts ? placeholders → $1 $2 $3
- *   - appends RETURNING * to INSERT statements so insertId works
- *   - maps result.rows[0].id → insertId
+ * db/connection.js — PostgreSQL (Supabase) MySQL-style wrapper
+ * Returns: [rows, fields, result]
  */
 
 const { Pool } = require('pg');
@@ -15,44 +11,79 @@ const pool = new Pool({
   max: 10,
 });
 
-function wrapQuery(queryFn) {
-  return async (sql, params) => {
-    let i = 0;
-    let pgSql = sql.replace(/\?/g, () => `$${++i}`);
+/**
+ * Convert MySQL-style ? placeholders → PostgreSQL $1, $2, $3
+ */
+function convertPlaceholders(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
+}
 
-    // Auto-append RETURNING * to INSERTs so insertId works
-    const isInsert = /^\s*INSERT/i.test(pgSql);
-    if (isInsert && !/RETURNING/i.test(pgSql)) {
-      pgSql = pgSql.replace(/;?\s*$/, ' RETURNING *');
+/**
+ * Wrap query to mimic mysql2 response style
+ */
+function wrapQuery(clientQuery) {
+  return async (sql, params = []) => {
+    try {
+      let pgSql = convertPlaceholders(sql);
+
+      const isInsert = /^\s*INSERT/i.test(pgSql);
+      const hasReturning = /RETURNING/i.test(pgSql);
+
+      if (isInsert && !hasReturning) {
+        pgSql = pgSql.replace(/;?\s*$/, ' RETURNING *');
+      }
+
+      const result = await clientQuery(pgSql, params);
+      const rows = result.rows || [];
+
+      // MySQL-style insertId
+      if (isInsert && rows.length > 0) {
+        result.insertId = rows[0].id;
+      }
+
+      return [rows, result.fields || null, result];
+    } catch (err) {
+      console.error('DB Query Error:', err.message);
+      throw err;
     }
-
-    const result = await queryFn(pgSql, params);
-    const rows   = result.rows || [];
-
-    if (isInsert && rows.length > 0) {
-      result.insertId = rows[0].id;
-    }
-
-    return [rows, result.fields, result];
   };
 }
 
-const originalPoolQuery = pool.query.bind(pool);
-pool.query = wrapQuery(originalPoolQuery);
+/**
+ * Override pool.query
+ */
+pool.query = wrapQuery(pool.query.bind(pool));
 
+/**
+ * MySQL-like connection handler (for transactions)
+ */
 pool.getConnection = async () => {
   const client = await pool.connect();
-  const originalClientQuery = client.query.bind(client);
-  client.query            = wrapQuery(originalClientQuery);
+
+  client.query = wrapQuery(client.query.bind(client));
+
   client.beginTransaction = () => client.query('BEGIN');
-  client.commit           = () => client.query('COMMIT');
-  client.rollback         = () => client.query('ROLLBACK');
-  client.release          = client.release.bind(client);
+  client.commit = () => client.query('COMMIT');
+  client.rollback = () => client.query('ROLLBACK');
+
+  client.release = client.release.bind(client);
+
   return client;
 };
 
-pool.connect()
-  .then(client => { console.log('✅ PostgreSQL (Supabase) connected'); client.release(); })
-  .catch(err   => { console.error('❌ PostgreSQL connection failed:', err.message); process.exit(1); });
+/**
+ * Test connection on startup
+ */
+(async () => {
+  try {
+    const client = await pool.connect();
+    console.log('✅ PostgreSQL (Supabase) connected successfully');
+    client.release();
+  } catch (err) {
+    console.error('❌ PostgreSQL connection failed:', err.message);
+    process.exit(1);
+  }
+})();
 
 module.exports = pool;
