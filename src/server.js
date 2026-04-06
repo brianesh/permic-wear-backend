@@ -25,7 +25,6 @@ app.use('/api/auth/login',rateLimit({windowMs:15*60_000,max:20,message:{error:'T
 app.use('/api/tuma/stk-push',rateLimit({windowMs:60_000,max:15,message:{error:'Too many payment requests.'}}));
 
 const db=require('./db/connection');
-require('./services/tuma').init(db);
 if(process.env.NODE_ENV!=='production'||process.env.ENABLE_BACKUP==='true'){
   try{require('../scripts/backup');}catch(e){console.warn('[BACKUP]',e.message);}
 }
