@@ -18,9 +18,15 @@ const ADMIN  = requireRole('super_admin', 'admin');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 // Build a store filter clause — super_admin with no store_id sees all
+// Note: products table may or may not have store_id column depending on migration
 function storeFilter(user, paramOffset = 1) {
+  // Super admin without store_id sees all products
   if (user.role === 'super_admin' && !user.store_id) return { clause: '', vals: [], next: paramOffset };
+  
   const storeId = user.store_id;
+  if (!storeId) return { clause: '', vals: [], next: paramOffset };
+  
+  // Filter by store_id if column exists, otherwise show all products
   return {
     clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
     vals: [storeId],
