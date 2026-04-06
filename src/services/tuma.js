@@ -27,6 +27,7 @@ function formatPhone(phone) {
 async function getCredentials() {
   const creds = {
     apiKey:      process.env.TUMA_API_KEY      || '',
+    email:       process.env.TUMA_EMAIL        || '',
     callbackUrl: process.env.TUMA_CALLBACK_URL || '',
     paybill:     process.env.TUMA_PAYBILL      || '880100',
     account:     process.env.TUMA_ACCOUNT      || '505008',
@@ -41,11 +42,12 @@ async function getCredentials() {
     try {
       const [rows] = await _db.query(
         `SELECT key_name, key_value FROM settings
-         WHERE key_name IN ('tuma_api_key','tuma_callback_url','tuma_paybill','tuma_account')`
+         WHERE key_name IN ('tuma_api_key','tuma_email','tuma_callback_url','tuma_paybill','tuma_account')`
       );
       rows.forEach(r => {
         if (!r.key_value?.trim()) return;
         if (r.key_name === 'tuma_api_key')      creds.apiKey      = r.key_value;
+        if (r.key_name === 'tuma_email')        creds.email       = r.key_value;
         if (r.key_name === 'tuma_callback_url') creds.callbackUrl = r.key_value;
         if (r.key_name === 'tuma_paybill')      creds.paybill     = r.key_value;
         if (r.key_name === 'tuma_account')      creds.account     = r.key_value;
@@ -57,15 +59,56 @@ async function getCredentials() {
   return creds;
 }
 
+// ── Get JWT token from Tuma ────────────────────────────────────────
+// Tuma requires getting a JWT token first using email + API key
+let _cachedToken = null;
+let _tokenExpiresAt = 0;
+
+async function getTumaToken() {
+  // Return cached token if still valid (tokens last 24 hours)
+  if (_cachedToken && Date.now() < _tokenExpiresAt) {
+    return _cachedToken;
+  }
+
+  const creds = await getCredentials();
+  if (!creds.apiKey || !creds.email) {
+    throw new Error('Tuma API key or email not configured. Go to Settings → Payment (Tuma).');
+  }
+
+  try {
+    const res = await axios.post(`${TUMA_BASE}/auth/token`, {
+      email: creds.email,
+      api_key: creds.apiKey,
+    }, { timeout: 10000 });
+
+    if (res.data.success && res.data.token) {
+      _cachedToken = res.data.token;
+      // Token expires in 24 hours (86400 seconds), cache for 23 hours to be safe
+      _tokenExpiresAt = Date.now() + (23 * 3600 * 1000);
+      console.log('[Tuma] Got JWT token, expires in 23 hours');
+      return _cachedToken;
+    } else {
+      throw new Error(res.data.message || 'Failed to get token');
+    }
+  } catch (err) {
+    const msg = err.response?.data?.message || err.response?.data?.error || err.message;
+    console.error('[Tuma] Token request failed:', msg);
+    throw new Error(`Tuma auth failed: ${msg}`);
+  }
+}
+
 // ── Initiate STK Push ─────────────────────────────────────────────
 async function stkPush(phone, amount, accountRef, description) {
   const creds = await getCredentials();
 
-  if (!creds.apiKey) {
+  if (!creds.apiKey || !creds.email) {
     throw new Error(
-      'Tuma API key not configured. Go to Settings → Payment (Tuma) and paste your API key from api.tuma.co.ke'
+      'Tuma API key or email not configured. Go to Settings → Payment (Tuma).'
     );
   }
+
+  // Get JWT token using email + API key
+  const token = await getTumaToken();
 
   const normalizedPhone = formatPhone(phone);
 
@@ -83,7 +126,7 @@ async function stkPush(phone, amount, accountRef, description) {
   try {
     const res = await axios.post(`${TUMA_BASE}/payment/stk-push`, payload, {
       headers: {
-        'Authorization': `Bearer ${creds.apiKey}`,
+        'Authorization': `Bearer ${token}`,
         'Content-Type':  'application/json',
       },
       timeout: 20000,
