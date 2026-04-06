@@ -12,10 +12,11 @@ async function requireAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     // Fetch fresh user from DB (catches deactivated accounts mid-session)
-    const [[user]] = await db.query(
-      'SELECT id, name, email, role, avatar, status, commission_rate FROM users WHERE id = ?',
+    const { rows } = await db.query(
+      'SELECT id, name, email, role, avatar, status, commission_rate FROM users WHERE id = $1',
       [payload.id]
     );
+    const user = rows[0];
     if (!user || user.status === 'inactive') {
       return res.status(401).json({ error: 'Account inactive or not found' });
     }
