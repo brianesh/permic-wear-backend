@@ -144,6 +144,7 @@ async function stkPush(phone, amount, accountRef, description) {
 // ── Test credentials ──────────────────────────────────────────────
 async function testCredentials() {
   const creds = await getCredentials();
+  
   if (!creds.apiKey) {
     return {
       ok: false,
@@ -152,37 +153,47 @@ async function testCredentials() {
     };
   }
 
+  if (!creds.email) {
+    return {
+      ok: false,
+      message: 'Tuma email not set. Go to Settings → Payment (Tuma) and enter your business email.',
+      report: { apiKey: true, email: false, callbackUrl: creds.callbackUrl },
+    };
+  }
+
   try {
-    // Attempt a lightweight auth check — hit the base URL
-    await axios.get(`${TUMA_BASE}/`, {
-      headers: { 'Authorization': `Bearer ${creds.apiKey}` },
-      timeout: 8000,
-    });
+    // Test by getting a JWT token (this validates email + API key)
+    const token = await getTumaToken();
+    
     return {
       ok: true,
-      message: 'Tuma API key is valid ✅',
+      message: 'Tuma credentials are valid ✅ JWT token obtained successfully.',
       report: {
         apiKey:      creds.apiKey.slice(0, 8) + '...',
+        email:       creds.email,
         callbackUrl: creds.callbackUrl,
         paybill:     creds.paybill,
         account:     creds.account,
+        token:       token.slice(0, 20) + '...',
       },
     };
   } catch (err) {
     const status = err.response?.status;
-    // 401 = wrong key, 404/200 = valid but no such route (still authenticated)
-    if (status === 401) {
-      return { ok: false, message: 'API key rejected (401 Unauthorized). Check your key.', report: { status } };
-    }
-    // Any other response means key was accepted (server just returned an error for the route)
-    if (status) {
-      return {
-        ok: true,
-        message: `API key accepted (HTTP ${status}). Tuma is reachable ✅`,
-        report: { apiKey: creds.apiKey.slice(0, 8) + '...', callbackUrl: creds.callbackUrl, status },
+    const msg = err.response?.data?.message || err.response?.data?.error || err.message;
+    
+    if (status === 401 || status === 403) {
+      return { 
+        ok: false, 
+        message: `Authentication failed (${status}): ${msg}. Check your email and API key.`, 
+        report: { status, email: creds.email } 
       };
     }
-    return { ok: false, message: `Cannot reach Tuma API: ${err.message}`, report: {} };
+    
+    return { 
+      ok: false, 
+      message: `Cannot authenticate with Tuma: ${msg || err.message}`, 
+      report: { status: status || 'network_error', email: creds.email } 
+    };
   }
 }
 
