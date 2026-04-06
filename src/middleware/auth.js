@@ -4,7 +4,9 @@ const db  = require('../db/connection');
 // Verify JWT token on every protected route
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
+  console.log('[Auth] Request:', req.method, req.path, 'Headers:', JSON.stringify(req.headers));
   if (!header || !header.startsWith('Bearer ')) {
+    console.warn('[Auth] No token provided. Header:', header);
     return res.status(401).json({ error: 'No token provided' });
   }
 
