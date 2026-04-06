@@ -28,30 +28,27 @@ async function getCredentials() {
   const creds = {
     apiKey:      process.env.TUMA_API_KEY      || '',
     callbackUrl: process.env.TUMA_CALLBACK_URL || '',
-    paybill:     process.env.MPESA_SHORTCODE   || '880100',
-    account:     process.env.MPESA_ACCOUNT     || '505008',
+    paybill:     process.env.TUMA_PAYBILL      || '880100',
+    account:     process.env.TUMA_ACCOUNT      || '505008',
   };
 
   // Auto-derive callback URL if not explicitly set
   if (!creds.callbackUrl && process.env.RENDER_EXTERNAL_URL) {
     creds.callbackUrl = `${process.env.RENDER_EXTERNAL_URL}/api/tuma/callback`;
   }
-  if (!creds.callbackUrl && process.env.MPESA_CALLBACK_URL) {
-    creds.callbackUrl = process.env.MPESA_CALLBACK_URL.replace('/api/mpesa/callback', '/api/tuma/callback');
-  }
 
   if (_db) {
     try {
       const [rows] = await _db.query(
         `SELECT key_name, key_value FROM settings
-         WHERE key_name IN ('tuma_api_key','tuma_callback_url','mpesa_shortcode','mpesa_account')`
+         WHERE key_name IN ('tuma_api_key','tuma_callback_url','tuma_paybill','tuma_account')`
       );
       rows.forEach(r => {
         if (!r.key_value?.trim()) return;
         if (r.key_name === 'tuma_api_key')      creds.apiKey      = r.key_value;
         if (r.key_name === 'tuma_callback_url') creds.callbackUrl = r.key_value;
-        if (r.key_name === 'mpesa_shortcode')   creds.paybill     = r.key_value;
-        if (r.key_name === 'mpesa_account')     creds.account     = r.key_value;
+        if (r.key_name === 'tuma_paybill')      creds.paybill     = r.key_value;
+        if (r.key_name === 'tuma_account')      creds.account     = r.key_value;
       });
     } catch (e) {
       console.warn('[Tuma] Could not read DB credentials:', e.message);

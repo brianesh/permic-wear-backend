@@ -144,42 +144,6 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/sales/confirm-mpesa-manual
-router.post('/confirm-mpesa-manual', requireAuth, async (req, res) => {
-  try {
-    const saleId = parseInt(req.body.sale_id, 10);
-    if (!saleId) return res.status(400).json({ error: 'sale_id required' });
-
-    const { rows: [sale] } = await db.query(
-      'SELECT id, cashier_id, status, payment_method FROM sales WHERE id = $1', [saleId]
-    );
-    if (!sale) return res.status(404).json({ error: 'Sale not found' });
-
-    const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
-    if (!isAdmin && sale.cashier_id !== req.user.id)
-      return res.status(403).json({ error: 'Forbidden' });
-    if (sale.status === 'completed')
-      return res.json({ message: 'Already completed', status: 'completed' });
-    if (sale.status === 'failed')
-      return res.status(400).json({ error: 'Sale was cancelled or failed' });
-
-    await db.query(
-      `UPDATE sales SET status='completed', amount_paid=selling_total WHERE id=$1 AND status='pending_mpesa'`,
-      [saleId]
-    );
-    const { rows: saleItems } = await db.query(
-      'SELECT product_id, qty FROM sale_items WHERE sale_id = $1', [saleId]
-    );
-    for (const si of saleItems) {
-      await db.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [si.qty, si.product_id]);
-    }
-    res.json({ message: 'Sale completed', status: 'completed' });
-  } catch (err) {
-    console.error('[sales] confirm-manual:', err);
-    res.status(500).json({ error: 'Failed to confirm sale' });
-  }
-});
-
 // GET /api/sales
 router.get('/', requireAuth, async (req, res) => {
   try {

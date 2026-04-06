@@ -1,5 +1,5 @@
 /**
- * tuma.js routes — replaces old mpesa.js routes
+ * tuma.js routes — Tuma Payment Solutions integration
  *
  * POST /api/tuma/stk-push          → initiate payment (checks block first)
  * POST /api/tuma/callback          → Tuma webhook (must be public HTTPS)
@@ -62,7 +62,7 @@ async function completeSale(saleId, paymentRef = '') {
     if (saleRow?.mpesa_phone) {
       sendSaleConfirmationSMS(db, {
         customerPhone: saleRow.mpesa_phone, txnId: saleRow.txn_id,
-        total: saleRow.selling_total, items: saleItems, mpesaRef: paymentRef,
+        total: saleRow.selling_total, items: saleItems, paymentRef: paymentRef,
       }).catch(() => {});
     }
   } catch (_) {}

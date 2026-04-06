@@ -8,9 +8,7 @@ const SUPERADMIN = requireRole('super_admin');
 const ADMIN      = requireRole('super_admin', 'admin');
 
 const SUPERADMIN_ONLY_KEYS = [
-  'mpesa_consumer_key', 'mpesa_consumer_secret',
-  'mpesa_sandbox_key', 'mpesa_sandbox_secret',
-  'mpesa_env',
+  'tuma_api_key', 'tuma_callback_url',
 ];
 
 router.get('/', requireAuth, ADMIN, async (req, res) => {
@@ -39,7 +37,7 @@ router.put('/', requireAuth, ADMIN, async (req, res) => {
 
     for (const key of keys) {
       const val = updates[key];
-      const SECRET_KEYS = ['mpesa_consumer_key','mpesa_consumer_secret','mpesa_sandbox_key','mpesa_sandbox_secret','at_api_key','gmail_app_password'];
+      const SECRET_KEYS = ['tuma_api_key','at_api_key','gmail_app_password'];
       if (SECRET_KEYS.includes(key) && (val === '' || val === null || val === undefined)) continue;
 
       await db.query(

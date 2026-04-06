@@ -194,8 +194,8 @@ async function checkAndAlertStock(db, lowThreshold, agingDays, adminPhone) {
 module.exports = { sendSMS, sendEmail, getSMSSettings, checkAndAlertStock };
 
 // ── Send sale confirmation SMS to customer ────────────────────────
-// Called after M-Pesa payment confirmed so customer gets a receipt via SMS
-async function sendSaleConfirmationSMS(db, { customerPhone, txnId, total, items, storeName, mpesaRef }) {
+// Called after payment confirmed so customer gets a receipt via SMS
+async function sendSaleConfirmationSMS(db, { customerPhone, txnId, total, items, storeName, paymentRef }) {
   if (!customerPhone) return;
   const opts = await getSMSSettings(db);
   if (!opts.smsEnabled) return;
@@ -209,7 +209,7 @@ async function sendSaleConfirmationSMS(db, { customerPhone, txnId, total, items,
   const message = [
     `✅ Permic Men's Wear`,
     `TXN: ${txnId}`,
-    mpesaRef ? `M-Pesa Ref: ${mpesaRef}` : '',
+    paymentRef ? `Payment Ref: ${paymentRef}` : '',
     `Items:\n${itemLines}${moreItems}`,
     `Total: KES ${Number(total||0).toLocaleString()}`,
     `Thank you for shopping with us! 👗`,
