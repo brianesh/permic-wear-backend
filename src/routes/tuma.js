@@ -159,6 +159,9 @@ router.post('/stk-push', requireAuth, async (req, res) => {
     if (!['pending_mpesa','pending_split'].includes(sale.status))
       return res.status(400).json({ error: `Sale is already ${sale.status}` });
 
+    // Generate a reference immediately - this will be used for tracking
+    const reference = `TUMA-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
     const tumaResp = await stkPush(phone, amount, sale.txn_id);
 
     // Handle different Tuma API response formats
@@ -176,31 +179,25 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       || (tumaResp.data && tumaResp.data.merchant_request_id)
       || (tumaResp.data && tumaResp.data.merchantRequestID);
 
-    if (!checkoutRequestId) {
-      console.error('[Tuma] No checkout_request_id in response:', JSON.stringify(tumaResp, null, 2));
-      return res.status(502).json({
-        error: 'Invalid response from Tuma API: missing checkout_request_id',
-        code: 'TUMA_INVALID_RESPONSE',
-        debug: process.env.NODE_ENV === 'development' ? tumaResp : undefined
-      });
-    }
-
+    // Insert transaction with our generated reference (even if checkout_request_id is missing)
     await db.query(
       `INSERT INTO tuma_transactions
-         (sale_id, checkout_request_id, merchant_request_id, phone, amount)
-       VALUES ($1,$2,$3,$4,$5)
+         (sale_id, checkout_request_id, merchant_request_id, phone, amount, payment_ref, status)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending')
        ON CONFLICT (checkout_request_id) DO UPDATE SET
          merchant_request_id=EXCLUDED.merchant_request_id, phone=EXCLUDED.phone,
          amount=EXCLUDED.amount, status='pending', initiated_at=NOW()`,
-      [sale_id, checkoutRequestId, merchantRequestId, fmtPhone, amount]
+      [sale_id, checkoutRequestId || reference, merchantRequestId, fmtPhone, amount, reference]
     );
 
     await log(req.user.id, req.user.name, req.user.role, 'tuma_stk_sent',
-      sale.txn_id, `Phone: ${phone}, KES ${amount}`, 'sale', req.ip);
+      sale.txn_id, `Phone: ${phone}, KES ${amount}, Ref: ${reference}`, 'sale', req.ip);
 
+    // Always return our reference - this is what the frontend will use for polling
     res.json({
       message:             tumaResp.customer_message || 'STK push sent',
-      checkout_request_id: tumaResp.checkout_request_id,
+      checkout_request_id: checkoutRequestId,
+      reference:           reference,  // Our generated reference for tracking
     });
   } catch (err) {
     console.error('[Tuma STK Push]', err.message);
