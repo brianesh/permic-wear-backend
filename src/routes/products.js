@@ -17,16 +17,19 @@ const router = express.Router();
 const ADMIN  = requireRole('super_admin', 'admin');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-// Build a store filter clause — super_admin with no store_id sees all
-// Note: products table may or may not have store_id column depending on migration
+// Build a store filter clause for products
+// super_admin and admin can see ALL products across all stores
+// cashiers only see products from their store (or global products with store_id IS NULL)
 function storeFilter(user, paramOffset = 1) {
-  // Super admin without store_id sees all products
-  if (user.role === 'super_admin' && !user.store_id) return { clause: '', vals: [], next: paramOffset };
+  // Super admin and admin see all products (no store filter)
+  if (user.role === 'super_admin' || user.role === 'admin') {
+    return { clause: '', vals: [], next: paramOffset };
+  }
   
+  // Cashiers see products from their store or global products
   const storeId = user.store_id;
   if (!storeId) return { clause: '', vals: [], next: paramOffset };
   
-  // Filter by store_id if column exists, otherwise show all products
   return {
     clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
     vals: [storeId],
