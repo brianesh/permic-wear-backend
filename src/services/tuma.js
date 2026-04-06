@@ -63,7 +63,7 @@ async function stkPush(phone, amount, accountRef, description) {
 
   if (!creds.apiKey) {
     throw new Error(
-      'Tuma API key not configured. Go to Settings → M-Pesa → Tuma section and paste your API key.'
+      'Tuma API key not configured. Go to Settings → Payment (Tuma) and paste your API key from api.tuma.co.ke'
     );
   }
 
