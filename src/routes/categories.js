@@ -95,12 +95,12 @@ router.post('/brands', requireAuth, ADMIN, async (req, res) => {
   try {
     const { name, top_type, photo_url, sort_order } = req.body;
     if (!name || !top_type) return res.status(400).json({ error: 'name and top_type are required' });
-    const [rrows] = await db.query(
-      'INSERT INTO brands (name, top_type, photo_url, sort_order) VALUES (?,?,?,?)',
+    const { rows } = await db.query(
+      'INSERT INTO brands (name, top_type, photo_url, sort_order) VALUES ($1,$2,$3,$4) RETURNING id',
       [name.trim(), top_type, photo_url || null, sort_order || 0]
     );
     await log(req.user.id, req.user.name, req.user.role, 'brand_created', name, `Type: ${top_type}`, 'inventory', req.ip);
-    res.status(201).json({ id: rrows[0].id, message: 'Brand created' });
+    res.status(201).json({ id: rows[0].id, message: 'Brand created' });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Brand already exists for this type' });
     console.error('[categories] POST brands:', err.message);
@@ -119,7 +119,7 @@ router.put('/brands/:id', requireAuth, ADMIN, async (req, res) => {
     if (is_active   !== undefined) { fields.push('is_active=?');   vals.push(is_active ? true : false); }
     if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
     vals.push(req.params.id);
-    await db.query(`UPDATE brands SET ${fields.join(',')} WHERE id=?`, vals);
+    await db.query(`UPDATE brands SET ${fields.join(', ')} WHERE id=$${vals.length}`, vals);
     res.json({ message: 'Brand updated' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update brand' });
@@ -129,9 +129,9 @@ router.put('/brands/:id', requireAuth, ADMIN, async (req, res) => {
 // ── DELETE /api/categories/brands/:id ────────────────────────────
 router.delete('/brands/:id', requireAuth, ADMIN, async (req, res) => {
   try {
-    const [[b]] = await db.query('SELECT name FROM brands WHERE id=?', [req.params.id]);
+    const { rows: [b] } = await db.query('SELECT name FROM brands WHERE id=$1', [req.params.id]);
     if (!b) return res.status(404).json({ error: 'Brand not found' });
-    await db.query('UPDATE brands SET is_active=false WHERE id=?', [req.params.id]);
+    await db.query('UPDATE brands SET is_active=false WHERE id=$1', [req.params.id]);
     await log(req.user.id, req.user.name, req.user.role, 'brand_deleted', b.name, '', 'inventory', req.ip);
     res.json({ message: 'Brand removed' });
   } catch (err) {
@@ -262,12 +262,12 @@ router.post('/subtypes', requireAuth, ADMIN, async (req, res) => {
   try {
     const { brand_id, name, photo_url, sort_order } = req.body;
     if (!brand_id || !name) return res.status(400).json({ error: 'brand_id and name are required' });
-    const [rrows] = await db.query(
-      'INSERT INTO sub_types (brand_id, name, photo_url, sort_order) VALUES (?,?,?,?)',
+    const { rows } = await db.query(
+      'INSERT INTO sub_types (brand_id, name, photo_url, sort_order) VALUES ($1,$2,$3,$4) RETURNING id',
       [brand_id, name.trim(), photo_url || null, sort_order || 0]
     );
     await log(req.user.id, req.user.name, req.user.role, 'subtype_created', name, `Brand: ${brand_id}`, 'inventory', req.ip);
-    res.status(201).json({ id: rrows[0].id, message: 'Sub-type created' });
+    res.status(201).json({ id: rows[0].id, message: 'Sub-type created' });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Sub-type already exists for this brand' });
     res.status(500).json({ error: 'Failed to create sub-type' });
@@ -279,13 +279,13 @@ router.put('/subtypes/:id', requireAuth, ADMIN, async (req, res) => {
   try {
     const { name, photo_url, sort_order, is_active } = req.body;
     const fields = [], vals = [];
-    if (name       !== undefined) { fields.push('name=?');       vals.push(name); }
-    if (photo_url  !== undefined) { fields.push('photo_url=?');  vals.push(photo_url); }
-    if (sort_order !== undefined) { fields.push('sort_order=?'); vals.push(sort_order); }
-    if (is_active  !== undefined) { fields.push('is_active=?');  vals.push(is_active ? true : false); }
+    if (name       !== undefined) { fields.push(`name=$${vals.length + 1}`);       vals.push(name); }
+    if (photo_url  !== undefined) { fields.push(`photo_url=$${vals.length + 1}`);  vals.push(photo_url); }
+    if (sort_order !== undefined) { fields.push(`sort_order=$${vals.length + 1}`); vals.push(sort_order); }
+    if (is_active  !== undefined) { fields.push(`is_active=$${vals.length + 1}`);  vals.push(is_active ? true : false); }
     if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
     vals.push(req.params.id);
-    await db.query(`UPDATE sub_types SET ${fields.join(',')} WHERE id=?`, vals);
+    await db.query(`UPDATE sub_types SET ${fields.join(',')} WHERE id=$${vals.length}`, vals);
     res.json({ message: 'Sub-type updated' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update sub-type' });
@@ -295,9 +295,9 @@ router.put('/subtypes/:id', requireAuth, ADMIN, async (req, res) => {
 // ── DELETE /api/categories/subtypes/:id ──────────────────────────
 router.delete('/subtypes/:id', requireAuth, ADMIN, async (req, res) => {
   try {
-    const [[st]] = await db.query('SELECT name FROM sub_types WHERE id=?', [req.params.id]);
+    const { rows: [st] } = await db.query('SELECT name FROM sub_types WHERE id=$1', [req.params.id]);
     if (!st) return res.status(404).json({ error: 'Sub-type not found' });
-    await db.query('UPDATE sub_types SET is_active=false WHERE id=?', [req.params.id]);
+    await db.query('UPDATE sub_types SET is_active=false WHERE id=$1', [req.params.id]);
     await log(req.user.id, req.user.name, req.user.role, 'subtype_deleted', st.name, '', 'inventory', req.ip);
     res.json({ message: 'Sub-type removed' });
   } catch (err) {
