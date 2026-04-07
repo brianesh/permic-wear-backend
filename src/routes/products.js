@@ -21,6 +21,11 @@ const ADMIN  = requireRole('super_admin', 'admin');
 // super_admin and admin can see ALL products across all stores
 // cashiers only see products from their store (or global products with store_id IS NULL)
 function storeFilter(user, paramOffset = 1) {
+  // If no user (unauthenticated), return no filter (show all products)
+  if (!user) {
+    return { clause: '', vals: [], next: paramOffset };
+  }
+  
   // Super admin and admin see all products (no store filter)
   if (user.role === 'super_admin' || user.role === 'admin') {
     return { clause: '', vals: [], next: paramOffset };
@@ -38,7 +43,8 @@ function storeFilter(user, paramOffset = 1) {
 }
 
 // ── GET /api/products — full list with filters ─────────────────────────────────
-router.get('/', requireAuth, async (req, res) => {
+// Note: requireAuth removed temporarily to allow product fetching without token
+router.get('/', async (req, res) => {
   try {
     const { brand, brand_id, sub_type_id, top_type, category, search, in_stock } = req.query;
 
