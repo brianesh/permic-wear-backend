@@ -258,9 +258,9 @@ const handleTumaCallback = async (req, res) => {
       const done = await completeSale(txn.sale_id, paymentRef);
       await resetCancels(txn.phone);
 
-      // Get customer name from sales table
+      // Get customer name from sales table (use mpesa_phone column)
       const { rows: [saleRow] } = await db.query(
-        'SELECT s.txn_id, s.phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
+        'SELECT s.txn_id, s.mpesa_phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
         [txn.sale_id]
       );
 
@@ -269,7 +269,7 @@ const handleTumaCallback = async (req, res) => {
       console.log(`  Tuma Ref: ${paymentRef || 'N/A'}`);
       console.log(`  Phone: ${txn.phone}`);
       console.log(`  Amount: KES ${txn.amount}`);
-      console.log(`  Customer: ${saleRow?.phone || 'N/A'}`);
+      console.log(`  Customer: ${saleRow?.mpesa_phone || 'N/A'}`);
       console.log(`  Cashier: ${saleRow?.cashier_name || 'N/A'}`);
       console.log(`  Status: ${done ? 'completed' : 'already done'}`);
     } else {
