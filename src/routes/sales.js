@@ -9,9 +9,9 @@ const router = express.Router();
 
 // ── POST /api/sales ──────────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
-  const conn = await db.getConnection();
+  const client = await db.pool.connect();
   try {
-    await conn.beginTransaction();
+    await client.query('BEGIN');
 
     const { items, payment_method, amount_paid = 0, phone, mpesa_phone, tuma_portion, mpesa_portion } = req.body;
 
@@ -22,7 +22,7 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Invalid payment method' });
 
     // Get cashier's commission rate + store
-    const { rows: [cashier] } = await conn.query(
+    const { rows: [cashier] } = await client.query(
       'SELECT commission_rate, store_id FROM users WHERE id = $1', [req.user.id]
     );
     const commissionRate = parseFloat(cashier?.commission_rate ?? 10);
@@ -32,7 +32,7 @@ router.post('/', requireAuth, async (req, res) => {
     const lineItems  = [];
 
     for (const item of items) {
-      const { rows: [product] } = await conn.query(
+      const { rows: [product] } = await client.query(
         'SELECT * FROM products WHERE id = $1 AND is_active = TRUE FOR UPDATE',
         [item.product_id]
       );
@@ -71,7 +71,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     // Support both phone and mpesa_phone columns for backward compatibility
     const customerPhone = phone || mpesa_phone || null;
-    const { rows: [saleRow] } = await conn.query(
+    const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid,
           change_given, extra_profit, commission, commission_rate, mpesa_phone, status)
@@ -83,7 +83,7 @@ router.post('/', requireAuth, async (req, res) => {
     const saleId = saleRow.id;
 
     for (const li of lineItems) {
-      await conn.query(
+      await client.query(
         `INSERT INTO sale_items
            (sale_id, product_id, product_name, sku, size, qty, min_price,
             selling_price, extra_profit, commission)
@@ -96,13 +96,13 @@ router.post('/', requireAuth, async (req, res) => {
     // Deduct stock immediately for Cash/Split-cash
     if (saleStatus === 'completed') {
       for (const li of lineItems) {
-        await conn.query(
+        await client.query(
           'UPDATE products SET stock = stock - $1 WHERE id = $2', [li.qty, li.product.id]
         );
       }
     }
 
-    await conn.commit();
+    await client.query('COMMIT');
 
     await log(req.user.id, req.user.name, req.user.role, 'sale', txnId,
       `KES ${sellingTotal.toLocaleString()} — ${payment_method}`, 'sale', req.ip);
@@ -139,13 +139,13 @@ router.post('/', requireAuth, async (req, res) => {
     });
 
   } catch (err) {
-    await conn.rollback();
+    await client.query('ROLLBACK');
     console.error('[sales] POST:', err.message);
     if (err.message.includes('Insufficient') || err.message.includes('below minimum') || err.message.includes('not found'))
       return res.status(422).json({ error: err.message });
     res.status(500).json({ error: 'Failed to record sale' });
   } finally {
-    conn.release();
+    client.release();
   }
 });
 
