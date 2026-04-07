@@ -211,7 +211,7 @@ router.get('/debug', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/products/search — autocomplete (fast, max 15 results) ─────────────
-// Returns products ranked: favorites first, then by name match
+// Returns products ranked by name match
 router.get('/search', requireAuth, async (req, res) => {
   try {
     const { q, top_type, in_stock } = req.query;
@@ -219,9 +219,8 @@ router.get('/search', requireAuth, async (req, res) => {
 
     const term    = q.trim();
     const like    = `%${term}%`;
-    const userId  = req.user.id;
-    const vals    = [like, userId];
-    let   idx     = 3;
+    const vals    = [like];
+    let   idx     = 2;
 
     let storeSql = '';
     if (req.user.store_id) {
@@ -240,23 +239,22 @@ router.get('/search', requireAuth, async (req, res) => {
     let inStockSql = '';
     if (in_stock === 'true') inStockSql = ' AND p.stock > 0';
 
-    // Rank: exact name start > brand match > anywhere; favorites bubble up
+    // Simple search without favorites (product_favorites table may not exist)
     const { rows } = await db.query(`
       SELECT
         p.*,
-        COALESCE(pf.use_count, 0) AS fav_count,
+        0 AS fav_count,
         CASE
           WHEN p.name  ILIKE $1 THEN 3
           WHEN p.brand ILIKE $1 THEN 2
           ELSE 1
         END AS match_rank
       FROM products p
-      LEFT JOIN product_favorites pf ON pf.product_id = p.id AND pf.user_id = $2
       WHERE p.is_active = TRUE
         AND (p.name ILIKE $1 OR p.brand ILIKE $1 OR p.sku ILIKE $1
              OR p.color ILIKE $1 OR p.category ILIKE $1)
         ${storeSql}${topTypeSql}${inStockSql}
-      ORDER BY fav_count DESC, match_rank DESC, p.name ASC
+      ORDER BY match_rank DESC, p.name ASC
       LIMIT 15
     `, vals);
 
