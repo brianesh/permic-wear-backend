@@ -1,6 +1,10 @@
 /**
- * /api/categories — CRUD for brands & sub_types
- * Super Admin + Admin can create / update / delete.
+ * /api/categories — Dynamic category hierarchy from products
+ * 
+ * Hierarchy: Top Type → Brand → Sub-Type → Products (with sizes, stock, images)
+ * Categories are dynamically rebuilt from products for consistency.
+ * 
+ * Super Admin + Admin can create / update / delete / rebuild.
  * All authenticated users can read.
  */
 const express = require('express');
@@ -10,15 +14,75 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router  = express.Router();
 const ADMIN   = requireRole('super_admin', 'admin');
 
+// ── GET /api/categories/hierarchy ─────────────────────────────────
+// Get full category hierarchy: Top Type → Brand → Sub-Type → Products
+router.get('/hierarchy', requireAuth, async (req, res) => {
+  try {
+    const { top_type } = req.query;
+    
+    // Get the hierarchy using the category_hierarchy view
+    let sql = 'SELECT * FROM category_hierarchy';
+    const vals = [];
+    let idx = 1;
+    
+    if (top_type) {
+      sql += ` WHERE top_type = $${idx++}`;
+      vals.push(top_type);
+    }
+    
+    sql += ' ORDER BY top_type, sort_order, brand_name, sub_type_name';
+    
+    const { rows } = await db.query(sql, vals);
+    
+    // Group into hierarchical structure
+    const hierarchy = {};
+    
+    for (const row of rows) {
+      const topType = row.top_type;
+      const brandId = row.brand_id;
+      const brandName = row.brand_name;
+      const subTypeId = row.sub_type_id;
+      const subTypeName = row.sub_type_name;
+      
+      if (!hierarchy[topType]) {
+        hierarchy[topType] = {};
+      }
+      
+      if (!hierarchy[topType][brandId]) {
+        hierarchy[topType][brandId] = {
+          id: brandId,
+          name: brandName,
+          top_type: topType,
+          sub_types: []
+        };
+      }
+      
+      if (subTypeId && subTypeName) {
+        hierarchy[topType][brandId].sub_types.push({
+          id: subTypeId,
+          name: subTypeName,
+          product_count: parseInt(row.product_count) || 0,
+          total_stock: parseInt(row.total_stock) || 0
+        });
+      }
+    }
+    
+    res.json(hierarchy);
+  } catch (err) {
+    console.error('[categories] GET hierarchy:', err.message);
+    res.status(500).json({ error: 'Failed to fetch category hierarchy' });
+  }
+});
+
 // ── GET /api/categories/brands?top_type=shoes|clothes ────────────
 router.get('/brands', requireAuth, async (req, res) => {
   try {
     const { top_type } = req.query;
     let sql = 'SELECT * FROM brands WHERE is_active = true';
     const vals = [];
-    if (top_type) { sql += ' AND top_type = ?'; vals.push(top_type); }
+    if (top_type) { sql += ` AND top_type = $${vals.length + 1}`; vals.push(top_type); }
     sql += ' ORDER BY sort_order, name';
-    const [rows] = await db.query(sql, vals);
+    const { rows } = await db.query(sql, vals);
     res.json(rows);
   } catch (err) {
     console.error('[categories] GET brands:', err.message);
@@ -79,14 +143,117 @@ router.delete('/brands/:id', requireAuth, ADMIN, async (req, res) => {
 router.get('/subtypes', requireAuth, async (req, res) => {
   try {
     const { brand_id } = req.query;
-    let sql = 'SELECT * FROM sub_types WHERE is_active=true';
+    let sql = 'SELECT st.*, COUNT(p.id) as product_count, COALESCE(SUM(p.stock), 0) as total_stock';
+    sql += ' FROM sub_types st';
+    sql += ' LEFT JOIN products p ON p.sub_type_id = st.id AND p.is_active = TRUE';
+    sql += ' WHERE st.is_active = true';
     const vals = [];
-    if (brand_id) { sql += ' AND brand_id=?'; vals.push(brand_id); }
-    sql += ' ORDER BY sort_order, name';
-    const [rows] = await db.query(sql, vals);
+    if (brand_id) { sql += ` AND st.brand_id = $${vals.length + 1}`; vals.push(brand_id); }
+    sql += ' GROUP BY st.id, st.brand_id, st.name, st.sort_order, st.is_active, st.created_at';
+    sql += ' ORDER BY st.sort_order, st.name';
+    const { rows } = await db.query(sql, vals);
     res.json(rows);
   } catch (err) {
+    console.error('[categories] GET subtypes:', err.message);
     res.status(500).json({ error: 'Failed to fetch sub-types' });
+  }
+});
+
+// ── GET /api/categories/tree ──────────────────────────────────────
+// Get category tree for POS/Inventory dropdown
+router.get('/tree', requireAuth, async (req, res) => {
+  try {
+    const { top_type, in_stock } = req.query;
+    
+    let sql = `
+      SELECT 
+        b.top_type,
+        b.id as brand_id,
+        b.name as brand_name,
+        st.id as sub_type_id,
+        st.name as sub_type_name,
+        COUNT(p.id) as product_count,
+        COALESCE(SUM(p.stock), 0) as total_stock
+      FROM brands b
+      LEFT JOIN sub_types st ON st.brand_id = b.id AND st.is_active = true
+      LEFT JOIN products p ON p.sub_type_id = st.id AND p.is_active = true
+    `;
+    
+    if (in_stock === 'true') {
+      sql += ' AND p.stock > 0';
+    }
+    
+    const vals = [];
+    if (top_type) {
+      sql += ` WHERE b.top_type = $${++vals.length}`;
+      vals.push(top_type);
+    }
+    
+    sql += `
+      GROUP BY b.top_type, b.id, b.name, st.id, st.name
+      ORDER BY b.top_type, b.sort_order, b.name, st.sort_order, st.name
+    `;
+    
+    const { rows } = await db.query(sql, vals);
+    
+    // Build tree structure
+    const tree = {};
+    
+    for (const row of rows) {
+      if (!tree[row.top_type]) {
+        tree[row.top_type] = {
+          name: row.top_type.charAt(0).toUpperCase() + row.top_type.slice(1),
+          brands: {}
+        };
+      }
+      
+      if (!tree[row.top_type].brands[row.brand_id]) {
+        tree[row.top_type].brands[row.brand_id] = {
+          id: row.brand_id,
+          name: row.brand_name,
+          sub_types: []
+        };
+      }
+      
+      if (row.sub_type_id) {
+        tree[row.top_type].brands[row.brand_id].sub_types.push({
+          id: row.sub_type_id,
+          name: row.sub_type_name,
+          product_count: parseInt(row.product_count),
+          total_stock: parseInt(row.total_stock)
+        });
+      }
+    }
+    
+    res.json(tree);
+  } catch (err) {
+    console.error('[categories] GET tree:', err.message);
+    res.status(500).json({ error: 'Failed to fetch category tree' });
+  }
+});
+
+// ── POST /api/categories/rebuild ──────────────────────────────────
+// Rebuild categories from products (Admin only)
+router.post('/rebuild', requireAuth, ADMIN, async (req, res) => {
+  try {
+    await log(req.user.id, req.user.name, req.user.role, 'categories_rebuilt',
+      'Category hierarchy', 'Triggered by ' + req.user.name, 'inventory', req.ip);
+    
+    // Call the PostgreSQL function to rebuild categories
+    await db.query('SELECT rebuild_categories_from_products()');
+    
+    // Get counts for response
+    const { rows: [brandCount] } = await db.query('SELECT COUNT(*) as count FROM brands WHERE is_active = true');
+    const { rows: [subtypeCount] } = await db.query('SELECT COUNT(*) as count FROM sub_types WHERE is_active = true');
+    
+    res.json({
+      message: 'Categories rebuilt successfully from products',
+      brands: parseInt(brandCount.count),
+      sub_types: parseInt(subtypeCount.count)
+    });
+  } catch (err) {
+    console.error('[categories] POST rebuild:', err.message);
+    res.status(500).json({ error: 'Failed to rebuild categories' });
   }
 });
 
