@@ -45,9 +45,9 @@ async function completeSale(saleId, paymentRef = '') {
   const { rows: [sale] } = await db.query('SELECT status FROM sales WHERE id = $1', [saleId]);
   if (!sale || sale.status === 'completed') return false;
 
-  // Use mpesa_ref column (not tuma_ref) to match DB schema
+  // Use tuma_ref column (matching updated DB schema)
   await db.query(
-    `UPDATE sales SET status='completed', mpesa_ref=$1, amount_paid=selling_total WHERE id=$2`,
+    `UPDATE sales SET status='completed', tuma_ref=$1, amount_paid=selling_total WHERE id=$2`,
     [paymentRef, saleId]
   );
   await deductStock(saleId);
@@ -55,14 +55,14 @@ async function completeSale(saleId, paymentRef = '') {
   // Async SMS confirmation
   try {
     const { rows: [saleRow] } = await db.query(
-      'SELECT txn_id, selling_total, mpesa_phone FROM sales WHERE id = $1', [saleId]
+      'SELECT txn_id, selling_total, phone FROM sales WHERE id = $1', [saleId]
     );
     const { rows: saleItems } = await db.query(
       'SELECT product_name, size, qty FROM sale_items WHERE sale_id = $1', [saleId]
     );
-    if (saleRow?.mpesa_phone) {
+    if (saleRow?.phone) {
       sendSaleConfirmationSMS(db, {
-        customerPhone: saleRow.mpesa_phone, txnId: saleRow.txn_id,
+        customerPhone: saleRow.phone, txnId: saleRow.txn_id,
         total: saleRow.selling_total, items: saleItems, paymentRef: paymentRef,
       }).catch(() => {});
     }
@@ -258,9 +258,9 @@ const handleTumaCallback = async (req, res) => {
       const done = await completeSale(txn.sale_id, paymentRef);
       await resetCancels(txn.phone);
 
-      // Get customer name from sales table (use mpesa_phone column)
+      // Get customer name from sales table (use phone column)
       const { rows: [saleRow] } = await db.query(
-        'SELECT s.txn_id, s.mpesa_phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
+        'SELECT s.txn_id, s.phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
         [txn.sale_id]
       );
 
@@ -269,7 +269,7 @@ const handleTumaCallback = async (req, res) => {
       console.log(`  Tuma Ref: ${paymentRef || 'N/A'}`);
       console.log(`  Phone: ${txn.phone}`);
       console.log(`  Amount: KES ${txn.amount}`);
-      console.log(`  Customer: ${saleRow?.mpesa_phone || 'N/A'}`);
+      console.log(`  Customer: ${saleRow?.phone || 'N/A'}`);
       console.log(`  Cashier: ${saleRow?.cashier_name || 'N/A'}`);
       console.log(`  Status: ${done ? 'completed' : 'already done'}`);
     } else {
@@ -294,21 +294,35 @@ router.post('/callback', handleTumaCallback);
 router.get('/callback', handleTumaCallback);
 
 // ── GET /api/tuma/status/:id ──────────────────────────────────────
-router.get('/status/:checkoutRequestId', requireAuth, async (req, res) => {
+// Accepts either checkout_request_id or our generated payment_ref (TUMA-...)
+router.get('/status/:id', requireAuth, async (req, res) => {
   try {
-    const { checkoutRequestId } = req.params;
-    const { rows: [txn] } = await db.query(
+    const { id } = req.params;
+    
+    // Try to find by payment_ref first (our generated reference like TUMA-...)
+    let { rows: [txn] } = await db.query(
       `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
        FROM tuma_transactions tt JOIN sales s ON tt.sale_id=s.id
-       WHERE tt.checkout_request_id=$1`, [checkoutRequestId]
+       WHERE tt.payment_ref=$1`, [id]
     );
+    
+    // If not found, try checkout_request_id
+    if (!txn) {
+      const { rows: rows2 } = await db.query(
+        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
+         FROM tuma_transactions tt JOIN sales s ON tt.sale_id=s.id
+         WHERE tt.checkout_request_id=$1`, [id]
+      );
+      txn = rows2;
+    }
+    
     if (!txn) return res.status(404).json({ error: 'Transaction not found' });
 
     // Sync if callback already fired
     if (txn.sale_status === 'completed' && txn.status !== 'success') {
       await db.query(
         "UPDATE tuma_transactions SET status='success', confirmed_at=NOW() WHERE checkout_request_id=$1",
-        [checkoutRequestId]
+        [txn.checkout_request_id]
       );
     }
     if (txn.sale_status === 'completed') {
@@ -321,7 +335,7 @@ router.get('/status/:checkoutRequestId', requireAuth, async (req, res) => {
     if (txn.status === 'pending' && ageMs > 90000) {
       await db.query(
         `UPDATE tuma_transactions SET status='timeout', confirmed_at=NOW()
-         WHERE checkout_request_id=$1 AND status='pending'`, [checkoutRequestId]
+         WHERE checkout_request_id=$1 AND status='pending'`, [txn.checkout_request_id]
       );
       return res.json({ status: 'timeout', txn_id: txn.txn_id, amount: txn.amount, age_ms: ageMs });
     }
