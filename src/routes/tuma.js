@@ -45,8 +45,9 @@ async function completeSale(saleId, paymentRef = '') {
   const { rows: [sale] } = await db.query('SELECT status FROM sales WHERE id = $1', [saleId]);
   if (!sale || sale.status === 'completed') return false;
 
+  // Use mpesa_ref column (not tuma_ref) to match DB schema
   await db.query(
-    `UPDATE sales SET status='completed', tuma_ref=$1, amount_paid=selling_total WHERE id=$2`,
+    `UPDATE sales SET status='completed', mpesa_ref=$1, amount_paid=selling_total WHERE id=$2`,
     [paymentRef, saleId]
   );
   await deductStock(saleId);
@@ -54,14 +55,14 @@ async function completeSale(saleId, paymentRef = '') {
   // Async SMS confirmation
   try {
     const { rows: [saleRow] } = await db.query(
-      'SELECT txn_id, selling_total, phone FROM sales WHERE id = $1', [saleId]
+      'SELECT txn_id, selling_total, mpesa_phone FROM sales WHERE id = $1', [saleId]
     );
     const { rows: saleItems } = await db.query(
       'SELECT product_name, size, qty FROM sale_items WHERE sale_id = $1', [saleId]
     );
-    if (saleRow?.phone) {
+    if (saleRow?.mpesa_phone) {
       sendSaleConfirmationSMS(db, {
-        customerPhone: saleRow.phone, txnId: saleRow.txn_id,
+        customerPhone: saleRow.mpesa_phone, txnId: saleRow.txn_id,
         total: saleRow.selling_total, items: saleItems, paymentRef: paymentRef,
       }).catch(() => {});
     }
@@ -156,7 +157,8 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       'SELECT id, txn_id, status FROM sales WHERE id = $1', [sale_id]
     );
     if (!sale) return res.status(404).json({ error: 'Sale not found' });
-    if (!['pending_tuma','pending_split'].includes(sale.status))
+    // Accept pending_mpesa, pending_tuma, and pending_split statuses
+    if (!['pending_mpesa', 'pending_tuma', 'pending_split'].includes(sale.status))
       return res.status(400).json({ error: `Sale is already ${sale.status}` });
 
     // Generate a reference immediately - this will be used for tracking
