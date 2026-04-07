@@ -18,25 +18,25 @@ const ADMIN  = requireRole('super_admin', 'admin');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 // Build a store filter clause for products
-// super_admin and admin can see ALL products across all stores
-// cashiers only see products from their store (or global products with store_id IS NULL)
+// super_admin can see ALL products across all stores
+// admin and cashiers only see products from their store
 function storeFilter(user, paramOffset = 1) {
   // If no user (unauthenticated), return no filter (show all products)
   if (!user) {
     return { clause: '', vals: [], next: paramOffset };
   }
   
-  // Super admin and admin see all products (no store filter)
-  if (user.role === 'super_admin' || user.role === 'admin') {
+  // Super admin sees all products (no store filter)
+  if (user.role === 'super_admin') {
     return { clause: '', vals: [], next: paramOffset };
   }
   
-  // Cashiers see products from their store or global products
+  // Admin and cashiers see products from their store only
   const storeId = user.store_id;
   if (!storeId) return { clause: '', vals: [], next: paramOffset };
   
   return {
-    clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
+    clause: ` AND p.store_id = $${paramOffset}`,
     vals: [storeId],
     next: paramOffset + 1,
   };
@@ -331,9 +331,15 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
     if (!name || !sku || !min_price)
       return res.status(400).json({ error: 'name, sku, min_price are required' });
 
-    const storeId = req.user.role === 'super_admin'
-      ? (req.body.store_id || null)  // super_admin can set global (null) or specific
-      : req.user.store_id;
+    // Determine store_id - products must be tied to a specific store
+    let storeId = req.body.store_id;
+    if (req.user.role === 'super_admin') {
+      // Super admin can specify any store or null for global products
+      storeId = storeId || null;
+    } else {
+      // Admin and cashiers must use their own store
+      storeId = req.user.store_id;
+    }
 
     const { rows } = await db.query(`
       INSERT INTO products
@@ -415,7 +421,14 @@ router.post('/bulk-import', requireAuth, ADMIN, async (req, res) => {
     if (!Array.isArray(products) || !products.length)
       return res.status(400).json({ error: 'products array required' });
 
-    const storeId = req.user.role === 'super_admin' ? (req.body.store_id || null) : req.user.store_id;
+    // Determine store_id - products must be tied to a specific store
+    let storeId = req.body.store_id;
+    if (req.user.role === 'super_admin') {
+      storeId = storeId || null;
+    } else {
+      storeId = req.user.store_id;
+    }
+
     let imported = 0;
 
     for (const p of products) {
@@ -508,10 +521,13 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
       if (subTypeRow) subTypeId = subTypeRow.id;
     }
 
-    // Determine store_id
-    const storeId = req.user.role === 'super_admin'
-      ? (product.store_id || null)
-      : req.user.store_id;
+    // Determine store_id - products must be tied to a specific store
+    let storeId = product.store_id;
+    if (req.user.role === 'super_admin') {
+      storeId = storeId || null;
+    } else {
+      storeId = req.user.store_id;
+    }
 
     // Generate all variants with unique SKUs
     const variants = await generateVariants(db, {
