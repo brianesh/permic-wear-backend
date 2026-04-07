@@ -162,7 +162,7 @@ router.get('/', async (req, res) => {
     }
     if (sub_type_id) {
       // Get subtype name to handle products with null sub_type_id
-      const { rows: [subRow] } = await db.query('SELECT name FROM subtypes WHERE id = $1', [sub_type_id]);
+      const { rows: [subRow] } = await db.query('SELECT name FROM sub_types WHERE id = $1', [sub_type_id]);
       if (subRow) {
         sql += ` AND (p.sub_type_id = $${idx} OR (p.sub_type_id IS NULL AND p.name ILIKE $${idx}))`;
         vals.push(`%${subRow.name}%`);
