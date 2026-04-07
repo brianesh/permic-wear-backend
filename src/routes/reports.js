@@ -70,9 +70,9 @@ router.get('/daily', requireAuth, ADMIN, async (req, res) => {
         SUM(s.commission)             AS commission,
         COUNT(*)                      AS transactions,
         COALESCE(SUM(si.qty_total),0) AS units,
-        SUM(CASE WHEN s.payment_method='Cash'   THEN s.selling_total ELSE 0 END) AS cash_total,
-        SUM(CASE WHEN s.payment_method='M-Pesa' THEN s.selling_total ELSE 0 END) AS mpesa_total,
-        SUM(CASE WHEN s.payment_method='Split'  THEN s.selling_total ELSE 0 END) AS split_total
+        SUM(CASE WHEN s.payment_method='Cash'  THEN s.selling_total ELSE 0 END) AS cash_total,
+        SUM(CASE WHEN s.payment_method='Tuma'  THEN s.selling_total ELSE 0 END) AS tuma_total,
+        SUM(CASE WHEN s.payment_method='Split' THEN s.selling_total ELSE 0 END) AS split_total
       FROM sales s
       LEFT JOIN (SELECT sale_id, SUM(qty) qty_total FROM sale_items GROUP BY sale_id) si
         ON si.sale_id = s.id

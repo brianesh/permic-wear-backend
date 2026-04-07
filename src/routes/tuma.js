@@ -46,7 +46,7 @@ async function completeSale(saleId, paymentRef = '') {
   if (!sale || sale.status === 'completed') return false;
 
   await db.query(
-    `UPDATE sales SET status='completed', mpesa_ref=$1, amount_paid=selling_total WHERE id=$2`,
+    `UPDATE sales SET status='completed', tuma_ref=$1, amount_paid=selling_total WHERE id=$2`,
     [paymentRef, saleId]
   );
   await deductStock(saleId);
@@ -54,14 +54,14 @@ async function completeSale(saleId, paymentRef = '') {
   // Async SMS confirmation
   try {
     const { rows: [saleRow] } = await db.query(
-      'SELECT txn_id, selling_total, mpesa_phone FROM sales WHERE id = $1', [saleId]
+      'SELECT txn_id, selling_total, phone FROM sales WHERE id = $1', [saleId]
     );
     const { rows: saleItems } = await db.query(
       'SELECT product_name, size, qty FROM sale_items WHERE sale_id = $1', [saleId]
     );
-    if (saleRow?.mpesa_phone) {
+    if (saleRow?.phone) {
       sendSaleConfirmationSMS(db, {
-        customerPhone: saleRow.mpesa_phone, txnId: saleRow.txn_id,
+        customerPhone: saleRow.phone, txnId: saleRow.txn_id,
         total: saleRow.selling_total, items: saleItems, paymentRef: paymentRef,
       }).catch(() => {});
     }
@@ -156,7 +156,7 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       'SELECT id, txn_id, status FROM sales WHERE id = $1', [sale_id]
     );
     if (!sale) return res.status(404).json({ error: 'Sale not found' });
-    if (!['pending_mpesa','pending_split'].includes(sale.status))
+    if (!['pending_tuma','pending_split'].includes(sale.status))
       return res.status(400).json({ error: `Sale is already ${sale.status}` });
 
     // Generate a reference immediately - this will be used for tracking
@@ -217,7 +217,7 @@ const handleTumaCallback = async (req, res) => {
     const resultCode  = body?.result_code;
     const resultDesc  = body?.result_desc      || '';
     const checkoutId  = body?.checkout_request_id;
-    const paymentRef  = body?.mpesa_receipt_number || '';
+    const paymentRef  = body?.receipt_number || body?.mpesa_receipt_number || '';
     const failReason  = body?.failure_reason   || '';
 
     // Extract additional customer information if available
@@ -258,16 +258,16 @@ const handleTumaCallback = async (req, res) => {
 
       // Get customer name from sales table
       const { rows: [saleRow] } = await db.query(
-        'SELECT s.txn_id, s.mpesa_phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
+        'SELECT s.txn_id, s.phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
         [txn.sale_id]
       );
 
       console.log(`[Tuma Callback] ✅ Payment Confirmed`);
       console.log(`  Sale ID: ${txn.sale_id} (${saleRow?.txn_id || 'N/A'})`);
-      console.log(`  M-Pesa Ref: ${paymentRef || 'N/A'}`);
+      console.log(`  Tuma Ref: ${paymentRef || 'N/A'}`);
       console.log(`  Phone: ${txn.phone}`);
       console.log(`  Amount: KES ${txn.amount}`);
-      console.log(`  Customer: ${saleRow?.mpesa_phone || 'N/A'}`);
+      console.log(`  Customer: ${saleRow?.phone || 'N/A'}`);
       console.log(`  Cashier: ${saleRow?.cashier_name || 'N/A'}`);
       console.log(`  Status: ${done ? 'completed' : 'already done'}`);
     } else {

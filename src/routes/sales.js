@@ -13,11 +13,11 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    const { items, payment_method, amount_paid = 0, mpesa_phone, mpesa_portion } = req.body;
+    const { items, payment_method, amount_paid = 0, phone, tuma_portion } = req.body;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
-    if (!['Cash', 'M-Pesa', 'Split'].includes(payment_method))
+    if (!['Cash', 'Tuma', 'Split'].includes(payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
 
     // Get cashier's commission rate + store
@@ -59,21 +59,21 @@ router.post('/', requireAuth, async (req, res) => {
     const changeGiven    = (['Cash','Split'].includes(payment_method))
                          ? Math.max(0, amountPaidNum - sellingTotal) : 0;
     const txnId          = `TXN-${uuidv4().replace(/-/g,'').slice(0,8).toUpperCase()}`;
-    const mpesaPortionNum = parseFloat(mpesa_portion) || 0;
+    const tumaPortionNum = parseFloat(tuma_portion) || 0;
 
     let saleStatus;
-    if (payment_method === 'M-Pesa') saleStatus = 'pending_mpesa';
-    else if (payment_method === 'Split' && mpesaPortionNum > 0) saleStatus = 'pending_split';
+    if (payment_method === 'Tuma') saleStatus = 'pending_tuma';
+    else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
     const { rows: [saleRow] } = await conn.query(
       `INSERT INTO sales
          (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid,
-          change_given, extra_profit, commission, commission_rate, mpesa_phone, status)
+          change_given, extra_profit, commission, commission_rate, phone, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-      [txnId, req.user.id, storeId, payment_method, sellingTotal, amountPaidNum,
-       changeGiven, extraProfit, totalCommission, commissionRate,
-       mpesa_phone || null, saleStatus]
+       [txnId, req.user.id, storeId, payment_method, sellingTotal, amountPaidNum,
+        changeGiven, extraProfit, totalCommission, commissionRate,
+        phone || null, saleStatus]
     );
     const saleId = saleRow.id;
 

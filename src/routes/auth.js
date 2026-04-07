@@ -17,7 +17,7 @@ router.post('/login', async (req, res) => {
     const { rows: [user] } = await db.query(
       `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.avatar,
               u.status, u.commission_rate, u.last_login, u.store_id,
-              s.name AS store_name
+              s.name AS store_name, s.location AS store_location
        FROM users u
        LEFT JOIN stores s ON s.id = u.store_id
        WHERE u.name ILIKE $1 OR u.email = $2`,
@@ -55,7 +55,8 @@ router.post('/login', async (req, res) => {
 router.get('/me', requireAuth, async (req, res) => {
   const { rows: [user] } = await db.query(
     `SELECT u.id, u.name, u.email, u.role, u.avatar, u.status,
-            u.commission_rate, u.last_login, u.store_id, s.name AS store_name
+            u.commission_rate, u.last_login, u.store_id,
+            s.name AS store_name, s.location AS store_location
      FROM users u LEFT JOIN stores s ON s.id = u.store_id WHERE u.id = $1`,
     [req.user.id]
   );

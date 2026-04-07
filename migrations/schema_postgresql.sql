@@ -74,17 +74,17 @@ CREATE TABLE IF NOT EXISTS sales (
   id              SERIAL PRIMARY KEY,
   txn_id          VARCHAR(20)   NOT NULL UNIQUE,
   cashier_id      INT           NOT NULL REFERENCES users(id),
-  payment_method  VARCHAR(10)   NOT NULL CHECK (payment_method IN ('Cash','M-Pesa','Split')),
+  payment_method  VARCHAR(10)   NOT NULL CHECK (payment_method IN ('Cash','Tuma','Split')),
   selling_total   DECIMAL(10,2) NOT NULL,
   amount_paid     DECIMAL(10,2) NOT NULL DEFAULT 0,
   change_given    DECIMAL(10,2) NOT NULL DEFAULT 0,
   extra_profit    DECIMAL(10,2) NOT NULL DEFAULT 0,
   commission      DECIMAL(10,2) NOT NULL DEFAULT 0,
   commission_rate DECIMAL(5,2)  NOT NULL DEFAULT 10,
-  mpesa_ref       VARCHAR(50),
-  mpesa_phone     VARCHAR(20),
+  tuma_ref        VARCHAR(50),
+  phone           VARCHAR(20),
   status          VARCHAR(20)   NOT NULL DEFAULT 'completed'
-                    CHECK (status IN ('completed','pending_mpesa','pending_cash','pending_split','failed')),
+                    CHECK (status IN ('completed','pending_tuma','pending_cash','pending_split','failed')),
   sale_date       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
@@ -110,25 +110,8 @@ CREATE TABLE IF NOT EXISTS sale_items (
 CREATE INDEX IF NOT EXISTS idx_sale_items_sale    ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
 
--- M-Pesa transactions
-CREATE TABLE IF NOT EXISTS mpesa_transactions (
-  id                  SERIAL PRIMARY KEY,
-  sale_id             INT          NOT NULL REFERENCES sales(id),
-  checkout_request_id VARCHAR(100) NOT NULL UNIQUE,
-  merchant_request_id VARCHAR(100),
-  phone               VARCHAR(20)  NOT NULL,
-  amount              DECIMAL(10,2) NOT NULL,
-  mpesa_ref           VARCHAR(50),
-  result_code         INT,
-  result_desc         VARCHAR(255),
-  status              VARCHAR(20)  NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending','success','failed','timeout')),
-  initiated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  confirmed_at        TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_mpesa_checkout ON mpesa_transactions(checkout_request_id);
-CREATE INDEX IF NOT EXISTS idx_mpesa_status   ON mpesa_transactions(status);
+-- Tuma transactions (legacy name kept for backward compatibility)
+-- Note: tuma_transactions is the new table, mpesa_transactions is deprecated
 
 -- Activity logs
 CREATE TABLE IF NOT EXISTS activity_logs (
@@ -209,7 +192,7 @@ INSERT INTO settings (key_name, key_value) VALUES
   ('aging_days','60'),
   ('sms_alerts','true'),
   ('email_alerts','true'),
-  ('mpesa_env','production')
+  ('tuma_env','production')
 ON CONFLICT (key_name) DO NOTHING;
 
 -- ── Tuma Payment Transactions ─────────────────────────────────────

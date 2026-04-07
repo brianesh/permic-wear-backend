@@ -88,7 +88,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       FROM sales s
       JOIN users u ON u.id = s.cashier_id
       LEFT JOIN stores st ON st.id = s.store_id
-      WHERE (UPPER(s.txn_id) = $1 OR UPPER(s.mpesa_ref) = $1)
+      WHERE (UPPER(s.txn_id) = $1 OR UPPER(s.tuma_ref) = $1)
         AND s.status = 'completed'
     `, [ref]);
 

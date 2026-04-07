@@ -80,16 +80,16 @@ CREATE TABLE IF NOT EXISTS sales (
   id              INT AUTO_INCREMENT PRIMARY KEY,
   txn_id          VARCHAR(20)   NOT NULL UNIQUE,
   cashier_id      INT           NOT NULL,
-  payment_method  ENUM('Cash','M-Pesa','Split') NOT NULL,
+  payment_method  ENUM('Cash','Tuma','Split') NOT NULL,
   selling_total   DECIMAL(10,2) NOT NULL,
   amount_paid     DECIMAL(10,2) NOT NULL DEFAULT 0,
   change_given    DECIMAL(10,2) NOT NULL DEFAULT 0,
   extra_profit    DECIMAL(10,2) NOT NULL DEFAULT 0,
   commission      DECIMAL(10,2) NOT NULL DEFAULT 0,
   commission_rate DECIMAL(5,2)  NOT NULL DEFAULT 10,
-  mpesa_ref       VARCHAR(50),
-  mpesa_phone     VARCHAR(20),
-  status          ENUM('completed','pending_mpesa','pending_cash','pending_split','failed') NOT NULL DEFAULT 'completed',
+  tuma_ref        VARCHAR(50),
+  phone           VARCHAR(20),
+  status          ENUM('completed','pending_tuma','pending_cash','pending_split','failed') NOT NULL DEFAULT 'completed',
   sale_date       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (cashier_id) REFERENCES users(id),
   INDEX idx_cashier   (cashier_id),
@@ -116,15 +116,15 @@ CREATE TABLE IF NOT EXISTS sale_items (
   INDEX idx_product (product_id)
 );
 
--- M-Pesa payment tracking
-CREATE TABLE IF NOT EXISTS mpesa_transactions (
+-- Tuma payment tracking
+CREATE TABLE IF NOT EXISTS tuma_transactions (
   id               INT AUTO_INCREMENT PRIMARY KEY,
   sale_id          INT          NOT NULL,
   checkout_request_id VARCHAR(100) NOT NULL UNIQUE,
   merchant_request_id VARCHAR(100),
   phone            VARCHAR(20)  NOT NULL,
   amount           DECIMAL(10,2) NOT NULL,
-  mpesa_ref        VARCHAR(50),
+  payment_ref      VARCHAR(50),
   result_code      INT,
   result_desc      VARCHAR(255),
   status           ENUM('pending','success','failed','timeout') NOT NULL DEFAULT 'pending',
@@ -133,6 +133,14 @@ CREATE TABLE IF NOT EXISTS mpesa_transactions (
   FOREIGN KEY (sale_id) REFERENCES sales(id),
   INDEX idx_checkout_id (checkout_request_id),
   INDEX idx_status      (status)
+);
+
+-- Tuma STK cancellation blocks
+CREATE TABLE IF NOT EXISTS tuma_cancel_blocks (
+  phone               VARCHAR(20) PRIMARY KEY,
+  consecutive_cancels INT NOT NULL DEFAULT 0,
+  last_cancel_at      DATETIME,
+  blocked_at          DATETIME
 );
 
 -- Activity logs
