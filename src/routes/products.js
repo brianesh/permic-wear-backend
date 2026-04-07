@@ -161,13 +161,9 @@ router.get('/', async (req, res) => {
       }
     }
     if (sub_type_id) {
-      // Get subtype name to handle products with null sub_type_id
-      const { rows: [subRow] } = await db.query('SELECT name FROM sub_types WHERE id = $1', [sub_type_id]);
-      if (subRow) {
-        sql += ` AND (p.sub_type_id = $${idx} OR (p.sub_type_id IS NULL AND p.name ILIKE $${idx}))`;
-        vals.push(`%${subRow.name}%`);
-        idx++;
-      }
+      // Direct filter by sub_type_id (no need for fuzzy matching)
+      sql += ` AND p.sub_type_id = $${idx++}`;
+      vals.push(parseInt(sub_type_id));
     }
     if (top_type)                          { sql += ` AND p.top_type = $${idx++}`;    vals.push(top_type); }
     if (category   && category !== 'All') { sql += ` AND p.category = $${idx++}`;     vals.push(category); }
@@ -272,11 +268,13 @@ router.get('/search', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/products/favorites — top 12 for this cashier ─────────────────────
+// Note: product_favorites table may not exist, fallback to recent products
 router.get('/favorites', requireAuth, async (req, res) => {
   try {
-    const { top_type } = req.query;
-    const vals = [req.user.id];
-    let idx = 2;
+    const { top_type, in_stock } = req.query;
+    const vals = [];
+    let idx = 1;
+    
     let topTypeSql = '';
     if (top_type) { topTypeSql = ` AND p.top_type = $${idx}`; vals.push(top_type); idx++; }
 
@@ -284,21 +282,36 @@ router.get('/favorites', requireAuth, async (req, res) => {
     if (req.user.store_id) {
       storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
       vals.push(req.user.store_id);
+      idx++;
     }
 
-    const { rows } = await db.query(`
-      SELECT p.*, pf.use_count, pf.last_used
-      FROM product_favorites pf
-      JOIN products p ON p.id = pf.product_id
-      WHERE pf.user_id = $1
-        AND p.is_active = TRUE
-        AND p.stock > 0
-        ${topTypeSql}${storeSql}
-      ORDER BY pf.use_count DESC, pf.last_used DESC
-      LIMIT 12
-    `, vals);
+    let inStockSql = '';
+    if (in_stock === 'true') inStockSql = ' AND p.stock > 0';
 
-    res.json(rows);
+    // Try to use product_favorites if table exists, otherwise fallback to popular products
+    try {
+      const { rows } = await db.query(`
+        SELECT p.*, COALESCE(pf.use_count, 0) as fav_count
+        FROM products p
+        LEFT JOIN product_favorites pf ON pf.product_id = p.id AND pf.user_id = $1
+        WHERE p.is_active = TRUE
+          ${inStockSql}${topTypeSql}${storeSql}
+        ORDER BY COALESCE(pf.use_count, 0) DESC, p.name ASC
+        LIMIT 12
+      `, [req.user.id, ...vals]);
+      res.json(rows);
+    } catch (favErr) {
+      // Fallback if product_favorites table doesn't exist
+      const { rows } = await db.query(`
+        SELECT p.*, 0 as fav_count
+        FROM products p
+        WHERE p.is_active = TRUE
+          ${inStockSql}${topTypeSql}${storeSql}
+        ORDER BY p.name ASC
+        LIMIT 12
+      `, vals);
+      res.json(rows);
+    }
   } catch (err) {
     console.error('[products] /favorites:', err.message);
     res.status(500).json({ error: 'Failed to load favorites' });
