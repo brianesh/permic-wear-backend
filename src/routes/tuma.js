@@ -340,8 +340,22 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       return res.json({ status: 'timeout', txn_id: txn.txn_id, amount: txn.amount, age_ms: ageMs });
     }
 
-    res.json({ status: txn.status, payment_ref: txn.payment_ref||null,
-               txn_id: txn.txn_id, amount: txn.amount, age_ms: ageMs });
+    // Return error details for failed transactions
+    const response = { 
+      status: txn.status, 
+      payment_ref: txn.payment_ref||null,
+      txn_id: txn.txn_id, 
+      amount: txn.amount, 
+      age_ms: ageMs 
+    };
+    
+    // Include error details for failed transactions
+    if (txn.status === 'failed' && txn.result_code !== null) {
+      response.error_code = txn.result_code;
+      response.error_message = txn.result_desc || '';
+    }
+    
+    res.json(response);
   } catch (err) {
     console.error('[Tuma Status]', err.message);
     res.status(500).json({ error: 'Failed to check payment status' });
