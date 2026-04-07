@@ -57,8 +57,24 @@ router.get('/', async (req, res) => {
     if (sf.clause) { sql += sf.clause; vals.push(...sf.vals); idx = sf.next; }
 
     if (brand      && brand    !== 'All') { sql += ` AND p.brand = $${idx++}`;        vals.push(brand); }
-    if (brand_id)                          { sql += ` AND p.brand_id = $${idx++}`;    vals.push(brand_id); }
-    if (sub_type_id)                       { sql += ` AND p.sub_type_id = $${idx++}`; vals.push(sub_type_id); }
+    if (brand_id) {
+      // Get brand name first to handle products with null brand_id
+      const { rows: [brandRow] } = await db.query('SELECT name FROM brands WHERE id = $1', [brand_id]);
+      if (brandRow) {
+        sql += ` AND (p.brand_id = $${idx} OR (p.brand_id IS NULL AND p.brand = $${idx}))`;
+        vals.push(brandRow.name);
+        idx++;
+      }
+    }
+    if (sub_type_id) {
+      // Get subtype name to handle products with null sub_type_id
+      const { rows: [subRow] } = await db.query('SELECT name FROM subtypes WHERE id = $1', [sub_type_id]);
+      if (subRow) {
+        sql += ` AND (p.sub_type_id = $${idx} OR (p.sub_type_id IS NULL AND p.name ILIKE $${idx}))`;
+        vals.push(`%${subRow.name}%`);
+        idx++;
+      }
+    }
     if (top_type)                          { sql += ` AND p.top_type = $${idx++}`;    vals.push(top_type); }
     if (category   && category !== 'All') { sql += ` AND p.category = $${idx++}`;     vals.push(category); }
     if (in_stock === 'true')               { sql += ` AND p.stock > 0`; }
