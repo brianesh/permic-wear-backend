@@ -107,10 +107,10 @@ SELECT
     pg.category,
     pg.photo_url,
     pg.is_active,
-    pg.store_id,
+    COALESCE(pg.store_id, NULL) as store_id,
     -- Total stock across all variants
     COALESCE(pg.stock, 0) + COALESCE(
-        (SELECT SUM(v.stock) FROM products v WHERE v.parent_id = pg.id AND v.is_active = TRUE), 0
+      (SELECT SUM(v.stock) FROM products v WHERE v.parent_id = pg.id AND v.is_active = TRUE), 0
     ) as total_stock,
     -- All variants as JSON array
     COALESCE(pg.variants, '[]'::json) || json_build_array(
