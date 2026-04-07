@@ -42,6 +42,100 @@ function storeFilter(user, paramOffset = 1) {
   };
 }
 
+// ── GET /api/products/grouped — products grouped by variants ───────────────────
+// Returns parent products with all size variants grouped together
+router.get('/grouped', requireAuth, async (req, res) => {
+  try {
+    const { brand_id, sub_type_id, top_type, search, in_stock } = req.query;
+
+    let sql = `
+      SELECT 
+        p.id,
+        p.name,
+        p.brand,
+        p.brand_id,
+        p.sub_type_id,
+        p.top_type,
+        p.category,
+        p.photo_url,
+        p.is_active,
+        p.store_id,
+        -- Total stock across all variants
+        COALESCE(p.stock, 0) + COALESCE(
+          (SELECT SUM(v.stock) FROM products v WHERE v.parent_id = p.id AND v.is_active = TRUE), 0
+        ) as total_stock,
+        -- All variants as JSON array (including the parent)
+        (
+          SELECT json_agg(json_build_object(
+            'id', v.id,
+            'size', v.size,
+            'sku', v.sku,
+            'stock', v.stock,
+            'min_price', v.min_price,
+            'color', v.color,
+            'photo_url', v.photo_url
+          ) ORDER BY v.size)
+          FROM products v 
+          WHERE (v.parent_id = p.id OR v.id = p.id) AND v.is_active = TRUE
+        ) as variants,
+        -- Variant count
+        1 + (SELECT COUNT(*) FROM products v WHERE v.parent_id = p.id AND v.is_active = TRUE) as variant_count
+      FROM products p
+      WHERE p.is_active = TRUE AND p.parent_id IS NULL
+    `;
+
+    const vals = [];
+    let idx = 1;
+
+    if (brand_id) { sql += ` AND p.brand_id = $${idx++}`; vals.push(brand_id); }
+    if (sub_type_id) { sql += ` AND p.sub_type_id = $${idx++}`; vals.push(sub_type_id); }
+    if (top_type) { sql += ` AND p.top_type = $${idx++}`; vals.push(top_type); }
+    if (in_stock === 'true') { sql += ` AND (p.stock + COALESCE((SELECT SUM(v.stock) FROM products v WHERE v.parent_id = p.id AND v.is_active = TRUE), 0)) > 0`; }
+    if (search) { sql += ` AND (p.name ILIKE $${idx} OR p.brand ILIKE $${idx})`; vals.push(`%${search}%`); idx++; }
+
+    sql += ' ORDER BY p.brand, p.name, p.color';
+
+    const { rows } = await db.query(sql, vals);
+    res.json(rows);
+  } catch (err) {
+    console.error('[products] GET /grouped:', err.message);
+    res.status(500).json({ error: 'Failed to fetch grouped products' });
+  }
+});
+
+// ── GET /api/products/variants/:id — get all variants of a product ─────────────
+router.get('/variants/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Get the parent product
+    const { rows: [parent] } = await db.query(
+      'SELECT * FROM products WHERE id = $1 AND is_active = TRUE', [id]
+    );
+    
+    if (!parent) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    // Get all variants (including parent)
+    const { rows: variants } = await db.query(`
+      SELECT id, name, brand, color, size, sku, stock, min_price, photo_url, is_active
+      FROM products 
+      WHERE (parent_id = $1 OR id = $1) AND is_active = TRUE
+      ORDER BY size
+    `, [id]);
+    
+    res.json({
+      parent: parent,
+      variants: variants,
+      total_stock: variants.reduce((sum, v) => sum + parseInt(v.stock || 0), 0)
+    });
+  } catch (err) {
+    console.error('[products] GET /variants/:id:', err.message);
+    res.status(500).json({ error: 'Failed to fetch product variants' });
+  }
+});
+
 // ── GET /api/products — full list with filters ─────────────────────────────────
 // Note: requireAuth removed temporarily to allow product fetching without token
 router.get('/', async (req, res) => {
