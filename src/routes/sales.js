@@ -13,7 +13,7 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { items, payment_method, amount_paid = 0, phone, mpesa_phone, tuma_portion, mpesa_portion } = req.body;
+    const { items, payment_method, amount_paid = 0, phone, tuma_portion, mpesa_portion } = req.body;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
@@ -69,16 +69,14 @@ router.post('/', requireAuth, async (req, res) => {
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
-    // Support both phone and mpesa_phone columns for backward compatibility
-    const customerPhone = phone || mpesa_phone || null;
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid,
-          change_given, extra_profit, commission, commission_rate, mpesa_phone, status)
+          change_given, extra_profit, commission, commission_rate, phone, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
        [txnId, req.user.id, storeId, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,
-        customerPhone, saleStatus]
+        phone || null, saleStatus]
     );
     const saleId = saleRow.id;
 
