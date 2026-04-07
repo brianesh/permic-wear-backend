@@ -9,7 +9,7 @@ const router = express.Router();
 
 // ── POST /api/sales ──────────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
-  const client = await db.pool.connect();
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
 
