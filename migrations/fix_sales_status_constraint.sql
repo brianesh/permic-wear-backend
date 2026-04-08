@@ -1,29 +1,33 @@
--- Fix sales table: expand status CHECK constraint to include pending_tuma, pending_split
--- and ensure tuma_ref column exists for storing Tuma payment references
--- Run this on your Supabase/PostgreSQL database
+-- ════════════════════════════════════════════════════════════════
+-- FIX: sales table CHECK constraints
+-- Run this on your Supabase/PostgreSQL database BEFORE deploying
+-- ════════════════════════════════════════════════════════════════
 
--- Step 1: Drop old constraint
+-- STEP 1: Fix payment_method CHECK constraint
+-- Old: only 'Cash','Tuma','Split' — blocks 'M-Pesa' inserts → 500 error
+ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_payment_method_check;
+ALTER TABLE sales ADD CONSTRAINT sales_payment_method_check
+  CHECK (payment_method IN ('Cash', 'Tuma', 'M-Pesa', 'Split'));
+
+-- STEP 2: Fix status CHECK constraint
 ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_status_check;
-
--- Step 2: Add expanded constraint
 ALTER TABLE sales ADD CONSTRAINT sales_status_check
   CHECK (status IN (
     'completed',
     'pending_tuma',
-    'pending_mpesa',   -- legacy alias kept for backward compat
+    'pending_mpesa',
     'pending_split',
     'pending_cash',
     'failed'
   ));
 
--- Step 3: Ensure tuma_ref column exists (stores Tuma/M-Pesa receipt code)
+-- STEP 3: Ensure tuma_ref column exists (stores M-Pesa/Tuma receipt code)
 ALTER TABLE sales ADD COLUMN IF NOT EXISTS tuma_ref VARCHAR(50);
 
--- Step 4: Fix any stuck pending_mpesa rows → pending_tuma
-UPDATE sales SET status = 'pending_tuma'
-WHERE status = 'pending_mpesa';
+-- STEP 4: Ensure store_id column exists
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS store_id INTEGER;
 
--- Step 5: Ensure tuma_transactions table exists
+-- STEP 5: Ensure tuma_transactions table exists
 CREATE TABLE IF NOT EXISTS tuma_transactions (
   id                   SERIAL PRIMARY KEY,
   sale_id              INT          NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
@@ -44,8 +48,9 @@ CREATE INDEX IF NOT EXISTS idx_tuma_txn_sale     ON tuma_transactions(sale_id);
 CREATE INDEX IF NOT EXISTS idx_tuma_txn_checkout ON tuma_transactions(checkout_request_id);
 CREATE INDEX IF NOT EXISTS idx_tuma_txn_status   ON tuma_transactions(status);
 CREATE INDEX IF NOT EXISTS idx_tuma_txn_phone    ON tuma_transactions(phone);
+CREATE INDEX IF NOT EXISTS idx_tuma_txn_payref   ON tuma_transactions(payment_ref);
 
--- Step 6: Ensure cancellation blocks table exists
+-- STEP 6: Ensure tuma_cancel_blocks table exists
 CREATE TABLE IF NOT EXISTS tuma_cancel_blocks (
   phone                VARCHAR(20) PRIMARY KEY,
   consecutive_cancels  INT         NOT NULL DEFAULT 0,
@@ -53,4 +58,4 @@ CREATE TABLE IF NOT EXISTS tuma_cancel_blocks (
   blocked_at           TIMESTAMPTZ
 );
 
-SELECT 'Migration complete: sales status constraint fixed' AS result;
+SELECT 'Migration complete ✓' AS result;

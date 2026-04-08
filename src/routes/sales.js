@@ -13,14 +13,15 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { items, payment_method, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
+    const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
     // Accept both 'phone' and 'mpesa_phone' from frontend
     const phone = req.body.phone || req.body.mpesa_phone || null;
+    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'M-Pesa' → 'Tuma'
+    const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
-    // Accept both 'Tuma' and 'M-Pesa' for backward compatibility
-    if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(payment_method))
+    if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(req.body.payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
 
     // Get cashier's commission rate
