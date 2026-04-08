@@ -76,7 +76,7 @@ router.post('/', requireAuth, async (req, res) => {
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
           change_given, extra_profit, commission, commission_rate
           , phone, store_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,
         phone || null, phone || null,
