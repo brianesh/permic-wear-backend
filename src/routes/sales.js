@@ -67,7 +67,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     let saleStatus;
     // Use pending_tuma for M-Pesa/Tuma payments to match DB CHECK constraint
-    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
+    if (payment_method === 'Tuma') saleStatus = 'pending_tuma';
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
