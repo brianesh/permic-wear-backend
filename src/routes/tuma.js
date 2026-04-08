@@ -45,9 +45,9 @@ async function completeSale(saleId, paymentRef = '') {
   const { rows: [sale] } = await db.query('SELECT status FROM sales WHERE id = $1', [saleId]);
   if (!sale || sale.status === 'completed') return false;
 
-  // Update sale - store payment ref in tuma_ref, don't overwrite phone
+  // Update sale - store payment ref in both tuma_ref and mpesa_ref columns
   await db.query(
-    `UPDATE sales SET status='completed', tuma_ref=$1, amount_paid=selling_total WHERE id=$2`,
+    `UPDATE sales SET status='completed', tuma_ref=$1, mpesa_ref=$1, amount_paid=selling_total WHERE id=$2`,
     [paymentRef, saleId]
   );
   await deductStock(saleId);
