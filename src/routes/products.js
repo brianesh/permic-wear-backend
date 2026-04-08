@@ -322,13 +322,23 @@ router.get('/favorites', requireAuth, async (req, res) => {
 // ── POST /api/products/favorites/:id — record product used in a sale ───────────
 router.post('/favorites/:id', requireAuth, async (req, res) => {
   try {
-    await db.query(`
-      INSERT INTO product_favorites (user_id, product_id, use_count, last_used)
-      VALUES ($1, $2, 1, NOW())
-      ON CONFLICT (user_id, product_id) DO UPDATE
-        SET use_count = product_favorites.use_count + 1,
-            last_used = NOW()
-    `, [req.user.id, req.params.id]);
+    // Check if product_favorites table exists first
+    const { rows } = await db.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'product_favorites'
+      ) as exists
+    `);
+    
+    if (rows[0]?.exists) {
+      await db.query(`
+        INSERT INTO product_favorites (user_id, product_id, use_count, last_used)
+        VALUES ($1, $2, 1, NOW())
+        ON CONFLICT (user_id, product_id) DO UPDATE
+          SET use_count = product_favorites.use_count + 1,
+              last_used = NOW()
+      `, [req.user.id, req.params.id]);
+    }
     res.json({ ok: true });
   } catch (err) {
     // Non-critical — don't fail the sale
