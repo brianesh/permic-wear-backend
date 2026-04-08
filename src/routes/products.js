@@ -137,12 +137,24 @@ router.get('/variants/:id', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/products — full list with filters ─────────────────────────────────
-// Note: requireAuth removed temporarily to allow product fetching without token
+// Uses proper JOINs with brands and sub_types tables for clean hierarchy
 router.get('/', async (req, res) => {
   try {
-    const { brand, brand_id, sub_type_id, top_type, category, search, in_stock } = req.query;
+    const { brand_id, sub_type_id, top_type, search, in_stock } = req.query;
 
-    let sql  = 'SELECT p.* FROM products p WHERE p.is_active = TRUE';
+    // Use proper JOINs to get brand and sub_type names from the database
+    let sql = `
+      SELECT 
+        p.*,
+        b.name AS brand,
+        b.top_type AS brand_top_type,
+        st.name AS category,
+        st.id AS sub_type_id_check
+      FROM products p
+      LEFT JOIN brands b ON p.brand_id = b.id
+      LEFT JOIN sub_types st ON p.sub_type_id = st.id
+      WHERE p.is_active = TRUE
+    `;
     const vals = [];
     let idx  = 1;
 
@@ -150,32 +162,18 @@ router.get('/', async (req, res) => {
     const sf = storeFilter(req.user, idx);
     if (sf.clause) { sql += sf.clause; vals.push(...sf.vals); idx = sf.next; }
 
-    if (brand      && brand    !== 'All') { sql += ` AND p.brand = $${idx++}`;        vals.push(brand); }
-    if (brand_id) {
-      // Get brand name first to handle products with null brand_id
-      const { rows: [brandRow] } = await db.query('SELECT name FROM brands WHERE id = $1', [brand_id]);
-      if (brandRow) {
-        sql += ` AND (p.brand_id = $${idx} OR (p.brand_id IS NULL AND p.brand = $${idx}))`;
-        vals.push(brandRow.name);
-        idx++;
-      }
-    }
-    if (sub_type_id) {
-      // Direct filter by sub_type_id (no need for fuzzy matching)
-      sql += ` AND p.sub_type_id = $${idx++}`;
-      vals.push(parseInt(sub_type_id));
-    }
-    if (top_type)                          { sql += ` AND p.top_type = $${idx++}`;    vals.push(top_type); }
-    if (category   && category !== 'All') { sql += ` AND p.category = $${idx++}`;     vals.push(category); }
-    if (in_stock === 'true')               { sql += ` AND p.stock > 0`; }
+    if (brand_id)   { sql += ` AND p.brand_id = $${idx++}`; vals.push(parseInt(brand_id)); }
+    if (sub_type_id) { sql += ` AND p.sub_type_id = $${idx++}`; vals.push(parseInt(sub_type_id)); }
+    if (top_type)   { sql += ` AND (p.top_type = $${idx} OR b.top_type = $${idx})`; vals.push(top_type); idx++; }
+    if (in_stock === 'true') { sql += ` AND p.stock > 0`; }
 
     if (search) {
-      sql += ` AND (p.name ILIKE $${idx} OR p.brand ILIKE $${idx} OR p.sku ILIKE $${idx} OR p.color ILIKE $${idx})`;
+      sql += ` AND (p.name ILIKE $${idx} OR b.name ILIKE $${idx} OR p.sku ILIKE $${idx} OR p.color ILIKE $${idx})`;
       vals.push(`%${search}%`);
       idx++;
     }
 
-    sql += ' ORDER BY p.brand, p.name, p.size';
+    sql += ' ORDER BY b.name, p.name, p.size';
 
     console.log('[products] Query:', sql, 'Vals:', vals);
     const { rows } = await db.query(sql, vals);
@@ -211,7 +209,7 @@ router.get('/debug', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/products/search — autocomplete (fast, max 15 results) ─────────────
-// Returns products ranked by name match
+// Uses JOINs with brands table for proper brand name matching
 router.get('/search', requireAuth, async (req, res) => {
   try {
     const { q, top_type, in_stock } = req.query;
@@ -231,7 +229,7 @@ router.get('/search', requireAuth, async (req, res) => {
 
     let topTypeSql = '';
     if (top_type) {
-      topTypeSql = ` AND p.top_type = $${idx}`;
+      topTypeSql = ` AND (p.top_type = $${idx} OR b.top_type = $${idx})`;
       vals.push(top_type);
       idx++;
     }
@@ -239,20 +237,25 @@ router.get('/search', requireAuth, async (req, res) => {
     let inStockSql = '';
     if (in_stock === 'true') inStockSql = ' AND p.stock > 0';
 
-    // Simple search without favorites (product_favorites table may not exist)
+    // Search with JOINs to get proper brand names from database
     const { rows } = await db.query(`
       SELECT
         p.*,
+        b.name AS brand,
+        b.top_type AS brand_top_type,
+        st.name AS category,
         0 AS fav_count,
         CASE
           WHEN p.name  ILIKE $1 THEN 3
-          WHEN p.brand ILIKE $1 THEN 2
+          WHEN b.name ILIKE $1 THEN 2
           ELSE 1
         END AS match_rank
       FROM products p
+      LEFT JOIN brands b ON p.brand_id = b.id
+      LEFT JOIN sub_types st ON p.sub_type_id = st.id
       WHERE p.is_active = TRUE
-        AND (p.name ILIKE $1 OR p.brand ILIKE $1 OR p.sku ILIKE $1
-             OR p.color ILIKE $1 OR p.category ILIKE $1)
+        AND (p.name ILIKE $1 OR b.name ILIKE $1 OR p.sku ILIKE $1
+             OR p.color ILIKE $1 OR st.name ILIKE $1)
         ${storeSql}${topTypeSql}${inStockSql}
       ORDER BY match_rank DESC, p.name ASC
       LIMIT 15

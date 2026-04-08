@@ -235,12 +235,50 @@ const handleTumaCallback = async (req, res) => {
     const customerName = [firstName, middleName, lastName].filter(Boolean).join(' ') || '';
 
     console.log('[Tuma Callback]', JSON.stringify(body, null, 2));
-    if (!checkoutId) return;
-
-    const { rows: [txn] } = await db.query(
-      'SELECT * FROM tuma_transactions WHERE checkout_request_id=$1', [checkoutId]
-    );
-    if (!txn) { console.warn('[Tuma Callback] No txn for', checkoutId); return; }
+    
+    // Try to find transaction by checkout_request_id first
+    let txn;
+    if (checkoutId) {
+      const result = await db.query(
+        'SELECT * FROM tuma_transactions WHERE checkout_request_id=$1', [checkoutId]
+      );
+      txn = result.rows[0];
+    }
+    
+    // If not found, try merchant_request_id (Tuma may send this instead)
+    if (!txn) {
+      const merchantReqId = body?.merchant_request_id || body?.MerchantRequestID;
+      if (merchantReqId) {
+        const result = await db.query(
+          'SELECT * FROM tuma_transactions WHERE merchant_request_id=$1', [merchantReqId]
+        );
+        txn = result.rows[0];
+        if (txn) console.log('[Tuma Callback] Found txn by merchant_request_id:', merchantReqId);
+      }
+    }
+    
+    // If still not found, try matching by phone + amount + recent (within 5 minutes)
+    if (!txn) {
+      const callbackPhone = customerPhone || formatPhone(body?.msisdn || '');
+      const callbackAmount = body?.amount || body?.Amount;
+      if (callbackPhone && callbackAmount) {
+        const result = await db.query(
+          `SELECT * FROM tuma_transactions 
+           WHERE phone=$1 AND amount=$2 
+           AND status='pending' 
+           AND initiated_at > NOW() - INTERVAL '5 minutes'
+           ORDER BY initiated_at DESC LIMIT 1`,
+          [callbackPhone, callbackAmount]
+        );
+        txn = result.rows[0];
+        if (txn) console.log('[Tuma Callback] Found txn by phone+amount match');
+      }
+    }
+    
+    if (!txn) { 
+      console.warn('[Tuma Callback] No txn found. checkout_id:', checkoutId, 'phone:', customerPhone, 'amount:', body?.amount); 
+      return; 
+    }
 
     // Idempotency: skip if already processed
     if (txn.status !== 'pending') {
@@ -252,8 +290,8 @@ const handleTumaCallback = async (req, res) => {
       await db.query(
         `UPDATE tuma_transactions SET status='success', payment_ref=$1,
          confirmed_at=NOW(), result_code=$2, result_desc=$3
-         WHERE checkout_request_id=$4`,
-        [paymentRef, resultCode, resultDesc, checkoutId]
+         WHERE id=$4`,
+        [paymentRef, resultCode, resultDesc, txn.id]
       );
       const done = await completeSale(txn.sale_id, paymentRef);
       await resetCancels(txn.phone);
@@ -275,8 +313,8 @@ const handleTumaCallback = async (req, res) => {
     } else {
       await db.query(
         `UPDATE tuma_transactions SET status='failed', result_code=$1,
-         result_desc=$2, confirmed_at=NOW() WHERE checkout_request_id=$3`,
-        [resultCode, resultDesc || failReason, checkoutId]
+         result_desc=$2, confirmed_at=NOW() WHERE id=$3`,
+        [resultCode, resultDesc || failReason, txn.id]
       );
       await db.query("UPDATE sales SET status='failed' WHERE id=$1", [txn.sale_id]);
 
