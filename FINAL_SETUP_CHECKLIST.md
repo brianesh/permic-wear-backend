@@ -5,7 +5,6 @@
 ### 1. Code Migration (100% Complete)
 - [x] Removed all M-Pesa references from codebase
 - [x] Updated all payment methods to use 'Tuma'
-- [x] Renamed database columns (`mpesa_ref` → `tuma_ref`, `mpesa_phone` → `phone`)
 - [x] Updated all ENUMs (`pending_mpesa` → `pending_tuma`)
 - [x] Modified all routes, services, and reports
 - [x] Updated database schemas for both MySQL and PostgreSQL

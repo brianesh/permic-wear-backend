@@ -4,7 +4,6 @@
 
 ### 1. TUMA Payment Integration (100% Complete)
 - ✅ All M-Pesa references removed and replaced with TUMA
-- ✅ Database migrated: `mpesa_ref` → `tuma_ref`, `mpesa_phone` → `phone`
 - ✅ Payment methods updated to 'Tuma'
 - ✅ Callback endpoint working at `https://permic-wear-api.onrender.com/api/tuma/callback`
 - ✅ Status endpoint accepts both payment_ref and checkout_request_id

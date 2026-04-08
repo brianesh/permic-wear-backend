@@ -29,7 +29,6 @@ This guide covers the complete migration from M-Pesa to TUMA Payment API for the
 **Sales Table:**
 - `payment_method` ENUM changed from `('Cash','M-Pesa','Split')` to `('Cash','Tuma','Split')`
 - `mpesa_ref` renamed to `tuma_ref`
-- `mpesa_phone` renamed to `phone`
 - `status` ENUM changed from `pending_mpesa` to `pending_tuma`
 
 **New Tables:**
@@ -62,7 +61,6 @@ For **PostgreSQL (Supabase)**:
 ```sql
 -- Update sales table
 ALTER TABLE sales RENAME COLUMN mpesa_ref TO tuma_ref;
-ALTER TABLE sales RENAME COLUMN mpesa_phone TO phone;
 
 -- Update payment_method enum
 ALTER TABLE sales ALTER COLUMN payment_method TYPE VARCHAR(10);
@@ -107,7 +105,7 @@ For **MySQL**:
 ```sql
 -- Update sales table
 ALTER TABLE sales CHANGE mpesa_ref tuma_ref VARCHAR(50);
-ALTER TABLE sales CHANGE mpesa_phone phone VARCHAR(20);
+
 
 -- Update payment_method enum
 ALTER TABLE sales MODIFY payment_method ENUM('Cash','Tuma','Split');

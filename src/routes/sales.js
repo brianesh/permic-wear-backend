@@ -14,8 +14,8 @@ router.post('/', requireAuth, async (req, res) => {
     await client.query('BEGIN');
 
     const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
-    // Accept both 'phone' and 'mpesa_phone' from frontend
-    const phone = req.body.phone || req.body.mpesa_phone || null;
+    // Accept 'phone' from frontend
+    const phone = req.body.phone || null;
     // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'M-Pesa' → 'Tuma'
     const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
 
@@ -74,8 +74,8 @@ router.post('/', requireAuth, async (req, res) => {
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
-          change_given, extra_profit, commission, commission_rate,
-          mpesa_phone, phone, store_id, status)
+          change_given, extra_profit, commission, commission_rate
+          , phone, store_id, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,

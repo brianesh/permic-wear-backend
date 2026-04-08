@@ -5,7 +5,7 @@
 
 -- Step 1: Rename columns in sales table
 ALTER TABLE sales RENAME COLUMN mpesa_ref TO tuma_ref;
-ALTER TABLE sales RENAME COLUMN mpesa_phone TO phone;
+
 
 -- Step 2: Update payment_method values from 'M-Pesa' to 'Tuma'
 UPDATE sales SET payment_method = 'Tuma' WHERE payment_method = 'M-Pesa';
@@ -71,9 +71,6 @@ BEGIN
     RAISE EXCEPTION 'Migration failed: mpesa_ref column still exists';
   END IF;
   
-  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'mpesa_phone') THEN
-    RAISE EXCEPTION 'Migration failed: mpesa_phone column still exists';
-  END IF;
   
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sales' AND column_name = 'tuma_ref') THEN
     RAISE EXCEPTION 'Migration failed: tuma_ref column does not exist';
