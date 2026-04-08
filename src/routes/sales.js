@@ -16,8 +16,8 @@ router.post('/', requireAuth, async (req, res) => {
     const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
     // Accept 'phone' from frontend
     const phone = req.body.phone || null;
-    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'M-Pesa' → 'Tuma'
-    const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
+    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'Tuma' → 'Tuma'
+    const payment_method = req.body.payment_method === 'Tuma' ? 'Tuma' : req.body.payment_method;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
@@ -66,13 +66,13 @@ router.post('/', requireAuth, async (req, res) => {
     const tumaPortionNum = parseFloat(tuma_portion || mpesa_portion) || 0;
 
     let saleStatus;
-    // Use pending_tuma for M-Pesa/Tuma payments to match DB CHECK constraint
+    // Use pending_tuma for Tuma/Tuma payments to match DB CHECK constraint
     if (payment_method === 'Tuma') saleStatus = 'pending_tuma';
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
     console.log('🔴 PAYMENT METHOD BEING SAVED:', payment_method);
-    
+
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
