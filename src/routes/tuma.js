@@ -219,7 +219,19 @@ const handleTumaCallback = async (req, res) => {
     const resultCode  = body?.result_code;
     const resultDesc  = body?.result_desc      || '';
     const checkoutId  = body?.checkout_request_id;
-    const paymentRef  = body?.receipt_number || body?.mpesa_receipt_number || '';
+    
+    // Extract M-Pesa receipt number from all possible field names
+    const paymentRef  = body?.receipt_number 
+                     || body?.mpesa_receipt_number 
+                     || body?.MpesaReceiptNumber 
+                     || body?.ReceiptNumber 
+                     || body?.receiptNumber
+                     || body?.TransactionID
+                     || body?.TransID
+                     || body?.trans_id
+                     || body?.transaction_id
+                     || '';
+    
     const failReason  = body?.failure_reason   || '';
 
     // Extract additional customer information if available
