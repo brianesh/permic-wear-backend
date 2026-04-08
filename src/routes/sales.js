@@ -21,7 +21,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
-    if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(req.body.payment_method))
+    if (!['Cash', 'Tuma', 'Split'].includes(req.body.payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
 
     // Get cashier's commission rate
