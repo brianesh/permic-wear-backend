@@ -78,8 +78,7 @@ router.post('/', requireAuth, async (req, res) => {
           , phone, store_id, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
-        changeGiven, extraProfit, totalCommission, commissionRate,
-        phone || null, phone || null,
+        changeGiven, extraProfit, totalCommission, commissionRate, phone || null,
         req.user.store_id || null, saleStatus]
     );
     const saleId = saleRow.id;
