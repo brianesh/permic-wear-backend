@@ -71,6 +71,8 @@ router.post('/', requireAuth, async (req, res) => {
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
+    console.log('🔴 PAYMENT METHOD BEING SAVED:', payment_method);
+    
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
