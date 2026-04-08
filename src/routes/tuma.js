@@ -219,87 +219,102 @@ const handleTumaCallback = async (req, res) => {
   res.json({ success: true, message: 'Received' }); // fast ACK
 
   try {
-    const body        = req.body;
-    const status      = body?.status;
-    const resultCode  = body?.result_code;
-    const resultDesc  = body?.result_desc      || '';
-    const checkoutId  = body?.checkout_request_id;
+    const body = req.body;
     
-    // Extract M-Pesa receipt number from all possible field names
-    const paymentRef  = body?.receipt_number 
-                     || body?.mpesa_receipt_number 
-                     || body?.MpesaReceiptNumber 
-                     || body?.ReceiptNumber 
-                     || body?.receiptNumber
-                     || body?.TransactionID
-                     || body?.TransID
-                     || body?.trans_id
-                     || body?.transaction_id
-                     || '';
+    // STEP 1: Extract reference (M-Pesa receipt number)
+    const paymentRef = body?.receipt_number 
+                    || body?.mpesa_receipt_number 
+                    || body?.MpesaReceiptNumber 
+                    || body?.ReceiptNumber 
+                    || body?.receiptNumber
+                    || body?.TransactionID
+                    || body?.TransID
+                    || body?.trans_id
+                    || body?.transaction_id
+                    || body?.reference
+                    || body?.Reference
+                    || '';
     
-    const failReason  = body?.failure_reason   || '';
-
-    // Extract additional customer information if available
+    // STEP 2: Extract status
+    const status = body?.status || body?.Status || '';
+    const resultCode = body?.result_code || body?.ResultCode || null;
+    const resultDesc = body?.result_desc || body?.ResultDesc || body?.result_description || '';
+    const failReason = body?.failure_reason || body?.FailureReason || '';
+    
+    // Get identifiers for lookup
+    const checkoutId = body?.checkout_request_id || body?.CheckoutRequestID || '';
+    const merchantId = body?.merchant_request_id || body?.MerchantRequestID || '';
     const customerPhone = body?.msisdn || body?.phone || body?.phone_number || body?.Msisdn || '';
-    const firstName     = body?.firstname || body?.FirstName || body?.first_name || '';
-    const middleName    = body?.middlename || body?.MiddleName || body?.middle_name || '';
-    const lastName      = body?.lastname || body?.LastName || body?.last_name || '';
+    const amount = body?.amount || body?.Amount || 0;
 
-    console.log('[Tuma Callback] Parsed Data:');
+    console.log('[Tuma Callback] Extracted Data:');
+    console.log('  paymentRef:', paymentRef);
     console.log('  status:', status);
     console.log('  resultCode:', resultCode);
     console.log('  checkoutId:', checkoutId);
-    console.log('  paymentRef:', paymentRef);
-    console.log('  customerPhone:', customerPhone);
-    console.log('  failReason:', failReason);
+    console.log('  merchantId:', merchantId);
+    console.log('  phone:', customerPhone);
+    console.log('  amount:', amount);
     
-    // Try to find transaction by checkout_request_id first
-    let txn;
+    // STEP 3: Find the transaction in database
+    let txn = null;
+    
+    // Try by checkout_request_id
     if (checkoutId) {
       const result = await db.query(
-        'SELECT * FROM tuma_transactions WHERE checkout_request_id=$1', [checkoutId]
+        'SELECT * FROM tuma_transactions WHERE checkout_request_id = $1', [checkoutId]
       );
       txn = result.rows[0];
+      if (txn) console.log('[Tuma Callback] Found txn by checkout_request_id');
     }
     
-    // If not found, try merchant_request_id (Tuma may send this instead)
+    // Try by merchant_request_id
+    if (!txn && merchantId) {
+      const result = await db.query(
+        'SELECT * FROM tuma_transactions WHERE merchant_request_id = $1', [merchantId]
+      );
+      txn = result.rows[0];
+      if (txn) console.log('[Tuma Callback] Found txn by merchant_request_id');
+    }
+    
+    // Try by our payment_ref (TUMA-...)
+    if (!txn && paymentRef) {
+      const result = await db.query(
+        'SELECT * FROM tuma_transactions WHERE payment_ref = $1', [paymentRef]
+      );
+      txn = result.rows[0];
+      if (txn) console.log('[Tuma Callback] Found txn by payment_ref');
+    }
+    
+    // Try by phone + amount + recent
+    if (!txn && customerPhone && amount) {
+      const result = await db.query(
+        `SELECT * FROM tuma_transactions 
+         WHERE phone = $1 AND amount = $2 
+         AND status = 'pending' 
+         AND initiated_at > NOW() - INTERVAL '5 minutes'
+         ORDER BY initiated_at DESC LIMIT 1`,
+        [customerPhone, parseFloat(amount)]
+      );
+      txn = result.rows[0];
+      if (txn) console.log('[Tuma Callback] Found txn by phone+amount');
+    }
+    
     if (!txn) {
-      const merchantReqId = body?.merchant_request_id || body?.MerchantRequestID;
-      if (merchantReqId) {
-        const result = await db.query(
-          'SELECT * FROM tuma_transactions WHERE merchant_request_id=$1', [merchantReqId]
-        );
-        txn = result.rows[0];
-        if (txn) console.log('[Tuma Callback] Found txn by merchant_request_id:', merchantReqId);
-      }
-    }
-    
-    // If still not found, try matching by phone + amount + recent (within 5 minutes)
-    if (!txn) {
-      const callbackPhone = customerPhone || formatPhone(body?.msisdn || '');
-      const callbackAmount = body?.amount || body?.Amount;
-      if (callbackPhone && callbackAmount) {
-        const result = await db.query(
-          `SELECT * FROM tuma_transactions 
-           WHERE phone=$1 AND amount=$2 
-           AND status='pending' 
-           AND initiated_at > NOW() - INTERVAL '5 minutes'
-           ORDER BY initiated_at DESC LIMIT 1`,
-          [callbackPhone, callbackAmount]
-        );
-        txn = result.rows[0];
-        if (txn) console.log('[Tuma Callback] Found txn by phone+amount match');
-      }
-    }
-    
-    if (!txn) { 
-      console.warn('[Tuma Callback] No txn found. checkout_id:', checkoutId, 'phone:', customerPhone, 'amount:', body?.amount); 
-      return; 
+      console.error('[Tuma Callback] ❌ TRANSACTION NOT FOUND!');
+      console.error('  checkoutId:', checkoutId);
+      console.error('  merchantId:', merchantId);
+      console.error('  paymentRef:', paymentRef);
+      console.error('  phone:', customerPhone);
+      console.error('  amount:', amount);
+      return;
     }
 
-    // Idempotency: skip if already processed
+    console.log(`[Tuma Callback] Found transaction: id=${txn.id}, sale_id=${txn.sale_id}`);
+
+    // Skip if already processed
     if (txn.status !== 'pending') {
-      console.log(`[Tuma Callback] Already ${txn.status}, skipping`);
+      console.log(`[Tuma Callback] Already processed (${txn.status}), skipping`);
       return;
     }
 
