@@ -45,9 +45,9 @@ async function completeSale(saleId, paymentRef = '') {
   const { rows: [sale] } = await db.query('SELECT status FROM sales WHERE id = $1', [saleId]);
   if (!sale || sale.status === 'completed') return false;
 
-  // Update sale with payment reference and mark as completed
+  // Update sale - store payment ref in tuma_ref, don't overwrite phone
   await db.query(
-    `UPDATE sales SET status='completed', phone=$1, amount_paid=selling_total WHERE id=$2`,
+    `UPDATE sales SET status='completed', tuma_ref=$1, amount_paid=selling_total WHERE id=$2`,
     [paymentRef, saleId]
   );
   await deductStock(saleId);
@@ -157,7 +157,7 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       'SELECT id, txn_id, status FROM sales WHERE id = $1', [sale_id]
     );
     if (!sale) return res.status(404).json({ error: 'Sale not found' });
-    // Accept pending_mpesa, pending_tuma, and pending_split statuses
+    // Accept pending_tuma, pending_mpesa (legacy), and pending_split statuses
     if (!['pending_mpesa', 'pending_tuma', 'pending_split'].includes(sale.status))
       return res.status(400).json({ error: `Sale is already ${sale.status}` });
 
@@ -356,7 +356,7 @@ const handleTumaCallback = async (req, res) => {
          result_desc=$2, confirmed_at=NOW() WHERE id=$3`,
         [resultCode, resultDesc || failReason, txn.id]
       );
-      await db.query("UPDATE sales SET status='failed' WHERE id=$1", [txn.sale_id]);
+      await db.query("UPDATE sales SET status='failed' WHERE id=$1 AND status NOT IN ('completed')", [txn.sale_id]);
 
       // Cancellation policy
       if (resultCode === 1032) {
@@ -398,7 +398,20 @@ router.get('/status/:id', requireAuth, async (req, res) => {
          FROM tuma_transactions tt JOIN sales s ON tt.sale_id=s.id
          WHERE tt.checkout_request_id=$1`, [id]
       );
-      txn = rows2;
+      txn = rows2[0] || null;
+    }
+
+    // If still not found, try by sale_id + most recent pending
+    if (!txn) {
+      const { rows: rows3 } = await db.query(
+        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
+         FROM tuma_transactions tt JOIN sales s ON tt.sale_id=s.id
+         WHERE tt.payment_ref LIKE 'TUMA-%'
+           AND tt.status='pending'
+           AND tt.initiated_at > NOW() - INTERVAL '10 minutes'
+         ORDER BY tt.initiated_at DESC LIMIT 1`
+      );
+      txn = rows3[0] || null;
     }
     
     if (!txn) return res.status(404).json({ error: 'Transaction not found' });
