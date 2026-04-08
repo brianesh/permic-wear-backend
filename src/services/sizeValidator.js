@@ -32,7 +32,7 @@ const TROUSER_SIZES = {
   extended: Array.from({ length: 25 }, (_, i) => (26 + i).toString()), // 26-50
 };
 
-// Map product types to size categories
+// Map product types to size categories (all keys should be lowercase for matching)
 const TYPE_TO_CATEGORY = {
   // Shoes
   'shoes': 'shoes',
@@ -41,28 +41,46 @@ const TYPE_TO_CATEGORY = {
   'sandals': 'shoes',
   'loafers': 'shoes',
   
-  // Tops
+  // Tops - including singular and plural forms
+  'shirt': 'tops',
   'shirts': 'tops',
+  't-shirt': 'tops',
   't-shirts': 'tops',
+  'tshirt': 'tops',
   'tshirts': 'tops',
   'polo': 'tops',
+  'polos': 'tops',
+  'hoodie': 'tops',
   'hoodies': 'tops',
+  'jacket': 'tops',
   'jackets': 'tops',
+  'vest': 'tops',
   'vests': 'tops',
+  'sweater': 'tops',
   'sweaters': 'tops',
+  'sweatshirt': 'tops',
   'sweatshirts': 'tops',
+  'tracksuit': 'tops',
   'tracksuits': 'tops',
   
-  // Trousers
+  // Bottoms/Trousers - including singular and plural forms
+  'trouser': 'trousers',
   'trousers': 'trousers',
+  'pant': 'trousers',
   'pants': 'trousers',
+  'jean': 'trousers',
   'jeans': 'trousers',
+  'short': 'trousers',
   'shorts': 'trousers',
+  'chino': 'trousers',
   'chinos': 'trousers',
   
   // Accessories (one size fits all)
+  'belt': 'accessories',
   'belts': 'accessories',
+  'cap': 'accessories',
   'caps': 'accessories',
+  'hat': 'accessories',
   'hats': 'accessories',
 };
 

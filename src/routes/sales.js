@@ -21,12 +21,11 @@ router.post('/', requireAuth, async (req, res) => {
     if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
 
-    // Get cashier's commission rate + store
+    // Get cashier's commission rate
     const { rows: [cashier] } = await client.query(
-      'SELECT commission_rate, store_id FROM users WHERE id = $1', [req.user.id]
+      'SELECT commission_rate FROM users WHERE id = $1', [req.user.id]
     );
     const commissionRate = parseFloat(cashier?.commission_rate ?? 10);
-    const storeId        = cashier?.store_id || req.user.store_id;
 
     let sellingTotal = 0, extraProfit = 0, totalCommission = 0;
     const lineItems  = [];
@@ -71,10 +70,10 @@ router.post('/', requireAuth, async (req, res) => {
 
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
-         (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid,
+         (txn_id, cashier_id, payment_method, selling_total, amount_paid,
           change_given, extra_profit, commission, commission_rate, phone, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-       [txnId, req.user.id, storeId, payment_method, sellingTotal, amountPaidNum,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+       [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,
         phone || null, saleStatus]
     );
@@ -153,7 +152,7 @@ router.get('/', requireAuth, async (req, res) => {
     const isAdmin   = ['super_admin', 'admin'].includes(req.user.role);
     const isCashier = req.user.role === 'cashier';
 
-    const { from, to, cashier_id, method, store_id, status, page = 1, limit = 20 } = req.query;
+    const { from, to, cashier_id, method, status, page = 1, limit = 20 } = req.query;
 
     // Default to only completed sales unless status filter is explicitly provided
     let where    = "status = 'completed'";
@@ -161,18 +160,14 @@ router.get('/', requireAuth, async (req, res) => {
     let   idx    = 1;
     const push   = v => { vals.push(v); return `$${idx++}`; };
 
-    // Store scoping — super_admin and admin can see all sales; cashiers see only their own
-    // Super admin can optionally filter by a specific store
-    if (req.user.role === 'super_admin' && store_id) {
-      where += ` AND s.store_id = ${push(store_id)}`;
-    } else if (isCashier) {
+    // Role-based scoping — super_admin and admin can see all sales; cashiers see only their own
+    if (isCashier) {
       // Cashiers only see their own sales
       where += ` AND s.cashier_id = ${push(req.user.id)}`;
-    } else if (req.user.role === 'admin' && req.user.store_id) {
-      // Admin sees all sales from their store
-      where += ` AND s.store_id = ${push(req.user.store_id)}`;
+    } else if (req.user.role === 'admin') {
+      // Admin sees all sales (no additional filter needed)
     }
-    // Super admin without store_id filter sees ALL sales (no where clause added)
+    // Super admin sees ALL sales (no where clause added)
 
     // Cashier filter (for admin/super_admin viewing other cashiers' sales)
     if (!isCashier && cashier_id) {
@@ -191,11 +186,9 @@ router.get('/', requireAuth, async (req, res) => {
 
     const offset    = (parseInt(page) - 1) * parseInt(limit);
     const { rows: sales } = await db.query(
-      `SELECT s.*, u.name AS cashier_name, u.role AS cashier_role,
-              st.name AS store_name
+      `SELECT s.*, u.name AS cashier_name, u.role AS cashier_role
        FROM sales s
        JOIN users u ON s.cashier_id = u.id
-       LEFT JOIN stores st ON st.id = s.store_id
        WHERE ${where}
        ORDER BY s.sale_date DESC
        LIMIT ${push(parseInt(limit))} OFFSET ${push(offset)}`,

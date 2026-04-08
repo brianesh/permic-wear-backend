@@ -222,6 +222,7 @@ const handleTumaCallback = async (req, res) => {
     const body = req.body;
     
     // STEP 1: Extract reference (M-Pesa receipt number)
+    // Try all possible field names for the M-Pesa receipt number
     const paymentRef = body?.receipt_number 
                     || body?.mpesa_receipt_number 
                     || body?.MpesaReceiptNumber 
@@ -233,6 +234,14 @@ const handleTumaCallback = async (req, res) => {
                     || body?.transaction_id
                     || body?.reference
                     || body?.Reference
+                    || body?.mpesa_ref
+                    || body?.MpesaRef
+                    || body?.payment_ref
+                    || body?.PaymentRef
+                    || body?.ref
+                    || body?.Ref
+                    || body?.receipt
+                    || body?.Receipt
                     || '';
     
     // STEP 2: Extract status
