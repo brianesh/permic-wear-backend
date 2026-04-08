@@ -13,7 +13,9 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { items, payment_method, amount_paid = 0, phone, tuma_portion, mpesa_portion } = req.body;
+    const { items, payment_method, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
+    // Accept both 'phone' and 'mpesa_phone' from frontend
+    const phone = req.body.phone || req.body.mpesa_phone || null;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
@@ -63,8 +65,8 @@ router.post('/', requireAuth, async (req, res) => {
     const tumaPortionNum = parseFloat(tuma_portion || mpesa_portion) || 0;
 
     let saleStatus;
-    // Use pending_mpesa for M-Pesa/Tuma payments to match DB schema
-    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_mpesa';
+    // Use pending_tuma for M-Pesa/Tuma payments to match DB CHECK constraint
+    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
@@ -155,7 +157,7 @@ router.get('/', requireAuth, async (req, res) => {
     const { from, to, cashier_id, method, status, page = 1, limit = 20 } = req.query;
 
     // Default to only completed sales unless status filter is explicitly provided
-    let where    = "status = 'completed'";
+    let where    = "s.status = 'completed'";
     const vals   = [];
     let   idx    = 1;
     const push   = v => { vals.push(v); return `$${idx++}`; };
@@ -178,7 +180,11 @@ router.get('/', requireAuth, async (req, res) => {
     if (to)     where += ` AND DATE(s.sale_date) <= ${push(to)}`;
     if (method) where += ` AND s.payment_method = ${push(method)}`;
     // Allow filtering by specific status (completed, pending_mpesa, failed, etc.)
-    if (status && status !== 'All') where += ` AND s.status = ${push(status)}`;
+    // When status filter is provided, override the default completed filter
+    if (status && status !== 'All') {
+      where = where.replace("s.status = 'completed'", '1=1');
+      where += ` AND s.status = ${push(status)}`;
+    }
 
     const { rows: [{ total }] } = await db.query(
       `SELECT COUNT(*) AS total FROM sales s WHERE ${where}`, vals
