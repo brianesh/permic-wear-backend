@@ -211,6 +211,11 @@ router.post('/stk-push', requireAuth, async (req, res) => {
 // Tuma POSTs here. ACK immediately, process asynchronously.
 // Also supports GET for testing/debugging purposes.
 const handleTumaCallback = async (req, res) => {
+  // Log the raw callback body FIRST before sending ACK
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log('[Tuma Callback] RAW BODY:', JSON.stringify(req.body, null, 2));
+  console.log('═══════════════════════════════════════════════════════════');
+
   res.json({ success: true, message: 'Received' }); // fast ACK
 
   try {
@@ -235,18 +240,18 @@ const handleTumaCallback = async (req, res) => {
     const failReason  = body?.failure_reason   || '';
 
     // Extract additional customer information if available
-    // Tuma/M-Pesa may provide: msisdn, firstname, middlename, lastname, bank name, etc.
     const customerPhone = body?.msisdn || body?.phone || body?.phone_number || body?.Msisdn || '';
     const firstName     = body?.firstname || body?.FirstName || body?.first_name || '';
     const middleName    = body?.middlename || body?.MiddleName || body?.middle_name || '';
     const lastName      = body?.lastname || body?.LastName || body?.last_name || '';
-    const bankName      = body?.bank_name || body?.BankName || body?.bank || body?.Bank || '';
-    const accountNumber = body?.account_number || body?.AccountNumber || body?.account || '';
 
-    // Build full customer name if available
-    const customerName = [firstName, middleName, lastName].filter(Boolean).join(' ') || '';
-
-    console.log('[Tuma Callback]', JSON.stringify(body, null, 2));
+    console.log('[Tuma Callback] Parsed Data:');
+    console.log('  status:', status);
+    console.log('  resultCode:', resultCode);
+    console.log('  checkoutId:', checkoutId);
+    console.log('  paymentRef:', paymentRef);
+    console.log('  customerPhone:', customerPhone);
+    console.log('  failReason:', failReason);
     
     // Try to find transaction by checkout_request_id first
     let txn;
@@ -298,31 +303,30 @@ const handleTumaCallback = async (req, res) => {
       return;
     }
 
+    console.log(`[Tuma Callback] Processing transaction ID: ${txn.id}, Sale ID: ${txn.sale_id}`);
+
     if (status === 'completed' || resultCode === 0) {
+      console.log(`[Tuma Callback] ✅ SUCCESS - Completing sale ${txn.sale_id} with ref ${paymentRef}`);
+      
       await db.query(
         `UPDATE tuma_transactions SET status='success', payment_ref=$1,
          confirmed_at=NOW(), result_code=$2, result_desc=$3
          WHERE id=$4`,
         [paymentRef, resultCode, resultDesc, txn.id]
       );
+      
       const done = await completeSale(txn.sale_id, paymentRef);
       await resetCancels(txn.phone);
 
-      // Get customer name from sales table (use phone column)
-      const { rows: [saleRow] } = await db.query(
-        'SELECT s.txn_id, s.phone, u.name as cashier_name FROM sales s LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = $1',
-        [txn.sale_id]
-      );
-
-      console.log(`[Tuma Callback] ✅ Payment Confirmed`);
-      console.log(`  Sale ID: ${txn.sale_id} (${saleRow?.txn_id || 'N/A'})`);
-      console.log(`  Tuma Ref: ${paymentRef || 'N/A'}`);
+      console.log(`[Tuma Callback] ✅ Payment Confirmed & Sale Completed`);
+      console.log(`  Sale ID: ${txn.sale_id}`);
+      console.log(`  Payment Ref: ${paymentRef || 'N/A'}`);
       console.log(`  Phone: ${txn.phone}`);
       console.log(`  Amount: KES ${txn.amount}`);
-      console.log(`  Customer: ${saleRow?.phone || 'N/A'}`);
-      console.log(`  Cashier: ${saleRow?.cashier_name || 'N/A'}`);
-      console.log(`  Status: ${done ? 'completed' : 'already done'}`);
+      console.log(`  Result: ${done ? 'COMPLETED' : 'ALREADY DONE'}`);
     } else {
+      console.log(`[Tuma Callback] ❌ FAILED - Marking sale ${txn.sale_id} as failed`);
+      
       await db.query(
         `UPDATE tuma_transactions SET status='failed', result_code=$1,
          result_desc=$2, confirmed_at=NOW() WHERE id=$3`,
@@ -334,10 +338,17 @@ const handleTumaCallback = async (req, res) => {
       if (resultCode === 1032) {
         await recordCancellation(txn.phone);
       }
-      console.log(`[Tuma Callback] ❌ code=${resultCode}: ${resultDesc || failReason}`);
+      console.log(`[Tuma Callback] ❌ Failed - Code: ${resultCode}, Reason: ${resultDesc || failReason}`);
     }
+    
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('[Tuma Callback] Processing COMPLETE');
+    console.log('═══════════════════════════════════════════════════════════');
   } catch (err) {
-    console.error('[Tuma Callback] Error:', err.message);
+    console.error('═══════════════════════════════════════════════════════════');
+    console.error('[Tuma Callback] ERROR:', err.message);
+    console.error('Stack:', err.stack);
+    console.error('═══════════════════════════════════════════════════════════');
   }
 };
 router.post('/callback', handleTumaCallback);
