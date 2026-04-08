@@ -153,9 +153,10 @@ router.get('/', requireAuth, async (req, res) => {
     const isAdmin   = ['super_admin', 'admin'].includes(req.user.role);
     const isCashier = req.user.role === 'cashier';
 
-    const { from, to, cashier_id, method, store_id, page = 1, limit = 20 } = req.query;
+    const { from, to, cashier_id, method, store_id, status, page = 1, limit = 20 } = req.query;
 
-    let where    = '1=1';
+    // Default to only completed sales unless status filter is explicitly provided
+    let where    = "status = 'completed'";
     const vals   = [];
     let   idx    = 1;
     const push   = v => { vals.push(v); return `$${idx++}`; };
@@ -181,6 +182,8 @@ router.get('/', requireAuth, async (req, res) => {
     if (from)   where += ` AND DATE(s.sale_date) >= ${push(from)}`;
     if (to)     where += ` AND DATE(s.sale_date) <= ${push(to)}`;
     if (method) where += ` AND s.payment_method = ${push(method)}`;
+    // Allow filtering by specific status (completed, pending_mpesa, failed, etc.)
+    if (status && status !== 'All') where += ` AND s.status = ${push(status)}`;
 
     const { rows: [{ total }] } = await db.query(
       `SELECT COUNT(*) AS total FROM sales s WHERE ${where}`, vals
