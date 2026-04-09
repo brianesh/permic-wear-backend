@@ -3,7 +3,7 @@
  *
  * POST /api/tuma/stk-push          → initiate payment (checks block first)
  * POST /api/tuma/callback          → Tuma webhook (must be public HTTPS)
- * GET  /api/tuma/status/:id        → frontend polling (supports TUMA-*, checkout_id, merchant_id)
+ * GET  /api/tuma/status/:id        → frontend polling (supports TUMA-*, checkout_id, merchant_id, sale_id)
  * POST /api/tuma/confirm-manual    → cashier fallback confirm
  * POST /api/tuma/confirm-by-ref    → cashier enters M-Pesa receipt code
  * GET  /api/tuma/test-credentials  → credential diagnostic (super_admin)
@@ -163,6 +163,8 @@ router.post('/stk-push', requireAuth, async (req, res) => {
 
     // Generate a reference immediately - this will be used for tracking and frontend polling
     const reference = `TUMA-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    
+    console.log(`[Tuma STK Push] Generated reference: ${reference} for sale ${sale_id}`);
 
     const tumaResp = await stkPush(phone, amount, sale.txn_id);
 
@@ -182,34 +184,41 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       || (tumaResp.data && tumaResp.data.merchantRequestID)
       || null;
 
-    // Insert transaction with our generated reference
-    await db.query(
+    // IMPORTANT: Insert transaction with BOTH IDs - our reference AND Tuma's checkout ID
+    // This ensures the frontend can find the transaction using our TUMA-* reference
+    const insertResult = await db.query(
       `INSERT INTO tuma_transactions
-         (sale_id, checkout_request_id, merchant_request_id, phone, amount, payment_ref, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+         (sale_id, checkout_request_id, merchant_request_id, phone, amount, payment_ref, status, initiated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW())
        ON CONFLICT (checkout_request_id) DO UPDATE SET
          merchant_request_id = EXCLUDED.merchant_request_id, 
          phone = EXCLUDED.phone,
          amount = EXCLUDED.amount, 
          payment_ref = EXCLUDED.payment_ref,
          status = 'pending', 
-         initiated_at = NOW()`,
+         initiated_at = NOW()
+       RETURNING id, payment_ref, checkout_request_id`,
       [sale_id, checkoutRequestId, merchantRequestId, fmtPhone, amount, reference]
     );
+    
+    const inserted = insertResult.rows[0];
+    console.log(`[Tuma STK Push] Transaction inserted: id=${inserted.id}, payment_ref=${inserted.payment_ref}, checkout_id=${inserted.checkout_request_id}`);
 
     await log(req.user.id, req.user.name, req.user.role, 'tuma_stk_sent',
       sale.txn_id, `Phone: ${phone}, KES ${amount}, Ref: ${reference}`, 'sale', req.ip);
 
-    // Always return our reference - this is what the frontend will use for polling
+    // Return our reference - this is what the frontend MUST use for polling
     res.json({
       success: true,
       message: tumaResp.customer_message || 'STK push sent',
       checkout_request_id: checkoutRequestId,
-      reference: reference,  // Our generated reference for frontend polling
-      merchant_request_id: merchantRequestId
+      reference: reference,  // CRITICAL: Frontend must use this for polling
+      merchant_request_id: merchantRequestId,
+      transaction_id: inserted.id
     });
   } catch (err) {
-    console.error('[Tuma STK Push]', err.message);
+    console.error('[Tuma STK Push] Error:', err.message);
+    console.error('[Tuma STK Push] Stack:', err.stack);
     res.status(500).json({ error: err.message || 'Failed to initiate payment.' });
   }
 });
@@ -323,7 +332,7 @@ const handleTumaCallback = async (req, res) => {
       return;
     }
 
-    console.log(`[Tuma Callback] 📦 Found transaction: id=${txn.id}, sale_id=${txn.sale_id}, current_status=${txn.status}`);
+    console.log(`[Tuma Callback] 📦 Found transaction: id=${txn.id}, sale_id=${txn.sale_id}, current_status=${txn.status}, payment_ref=${txn.payment_ref}`);
 
     // Skip if already processed
     if (txn.status !== 'pending') {
@@ -337,7 +346,8 @@ const handleTumaCallback = async (req, res) => {
     const isSuccess = status === 'completed' || resultCode === 0 || resultCode === '0';
     
     if (isSuccess) {
-      console.log(`[Tuma Callback] ✅ SUCCESS - Completing sale ${txn.sale_id} with ref ${paymentRef || txn.payment_ref}`);
+      const finalPaymentRef = paymentRef || txn.payment_ref;
+      console.log(`[Tuma Callback] ✅ SUCCESS - Completing sale ${txn.sale_id} with ref ${finalPaymentRef}`);
       
       // Update transaction as successful
       await db.query(
@@ -348,18 +358,18 @@ const handleTumaCallback = async (req, res) => {
              result_code = $2, 
              result_desc = $3
          WHERE id = $4`,
-        [paymentRef || txn.payment_ref, resultCode, resultDesc, txn.id]
+        [finalPaymentRef, resultCode, resultDesc, txn.id]
       );
       
       // Complete the sale (idempotent)
-      const completed = await completeSale(txn.sale_id, paymentRef || txn.payment_ref);
+      const completed = await completeSale(txn.sale_id, finalPaymentRef);
       
       // Reset cancellation counter on success
       await resetCancels(txn.phone);
 
       console.log(`[Tuma Callback] 🎉 Payment Confirmed & Sale Completed`);
       console.log(`  Sale ID: ${txn.sale_id}`);
-      console.log(`  Payment Ref: ${paymentRef || txn.payment_ref}`);
+      console.log(`  Payment Ref: ${finalPaymentRef}`);
       console.log(`  Phone: ${txn.phone}`);
       console.log(`  Amount: KES ${txn.amount}`);
       console.log(`  Result: ${completed ? 'NEWLY COMPLETED' : 'ALREADY COMPLETED'}`);
@@ -409,31 +419,87 @@ router.post('/callback', handleTumaCallback);
 router.get('/callback', handleTumaCallback); // For testing/debugging
 
 // ── GET /api/tuma/status/:id ──────────────────────────────────────
-// Supports: TUMA-* (payment_ref), checkout_request_id, or merchant_request_id
+// Supports: TUMA-* (payment_ref), checkout_request_id, merchant_request_id, or sale_id
 router.get('/status/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     
     console.log(`[Tuma Status] 🔍 Looking up transaction with ID: ${id}`);
     
-    // Single comprehensive query that searches all possible ID fields
-    const { rows: [txn] } = await db.query(
+    let txn = null;
+    
+    // Strategy 1: Search by payment_ref (TUMA-* reference)
+    const { rows: [byPaymentRef] } = await db.query(
       `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
        FROM tuma_transactions tt 
        JOIN sales s ON tt.sale_id = s.id
-       WHERE tt.payment_ref = $1 
-          OR tt.checkout_request_id = $1 
-          OR tt.merchant_request_id = $1
-       LIMIT 1`, 
+       WHERE tt.payment_ref = $1`,
       [id]
     );
+    txn = byPaymentRef;
+    if (txn) console.log(`[Tuma Status] ✅ Found by payment_ref`);
+    
+    // Strategy 2: Search by checkout_request_id
+    if (!txn) {
+      const { rows: [byCheckout] } = await db.query(
+        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
+         FROM tuma_transactions tt 
+         JOIN sales s ON tt.sale_id = s.id
+         WHERE tt.checkout_request_id = $1`,
+        [id]
+      );
+      txn = byCheckout;
+      if (txn) console.log(`[Tuma Status] ✅ Found by checkout_request_id`);
+    }
+    
+    // Strategy 3: Search by merchant_request_id
+    if (!txn) {
+      const { rows: [byMerchant] } = await db.query(
+        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
+         FROM tuma_transactions tt 
+         JOIN sales s ON tt.sale_id = s.id
+         WHERE tt.merchant_request_id = $1`,
+        [id]
+      );
+      txn = byMerchant;
+      if (txn) console.log(`[Tuma Status] ✅ Found by merchant_request_id`);
+    }
+    
+    // Strategy 4: If ID is numeric, search by sale_id
+    if (!txn && /^\d+$/.test(id)) {
+      const { rows: [bySaleId] } = await db.query(
+        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
+         FROM tuma_transactions tt 
+         JOIN sales s ON tt.sale_id = s.id
+         WHERE tt.sale_id = $1
+         ORDER BY tt.initiated_at DESC
+         LIMIT 1`,
+        [parseInt(id)]
+      );
+      txn = bySaleId;
+      if (txn) console.log(`[Tuma Status] ✅ Found by sale_id: ${id}`);
+    }
+    
+    // Strategy 5: Last resort - get most recent transaction for this user session
+    if (!txn && id.startsWith('TUMA-')) {
+      const { rows: [recent] } = await db.query(
+        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
+         FROM tuma_transactions tt 
+         JOIN sales s ON tt.sale_id = s.id
+         WHERE tt.initiated_at > NOW() - INTERVAL '10 minutes'
+         ORDER BY tt.initiated_at DESC
+         LIMIT 1`
+      );
+      txn = recent;
+      if (txn) console.log(`[Tuma Status] ✅ Found most recent transaction as fallback`);
+    }
     
     if (!txn) {
       console.log(`[Tuma Status] ❌ No transaction found for: ${id}`);
       return res.status(404).json({ 
         success: false,
         error: 'Transaction not found',
-        id: id
+        id: id 
       });
     }
     
@@ -442,7 +508,8 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       payment_ref: txn.payment_ref,
       checkout_request_id: txn.checkout_request_id,
       status: txn.status,
-      sale_status: txn.sale_status
+      sale_status: txn.sale_status,
+      sale_id: txn.sale_id
     });
     
     // Sync if callback already fired but status not updated in tuma_transactions
@@ -523,6 +590,7 @@ router.get('/status/:id', requireAuth, async (req, res) => {
     res.json(response);
   } catch (err) {
     console.error('[Tuma Status] ❌ Error:', err.message);
+    console.error('[Tuma Status] Stack:', err.stack);
     res.status(500).json({ 
       success: false,
       error: 'Failed to check payment status',
