@@ -388,7 +388,8 @@ router.get('/status/:id', requireAuth, async (req, res) => {
     let { rows: [txn] } = await db.query(
       `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
        FROM tuma_transactions tt JOIN sales s ON tt.sale_id=s.id
-       WHERE tt.payment_ref=$1`, [id]
+       WHERE tt.payment_ref=$1 OR tt.checkout_request_id=$1
+       LIMIT 1`, [id]
     );
     
     // If not found, try checkout_request_id
