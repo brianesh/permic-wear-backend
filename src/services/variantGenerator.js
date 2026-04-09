@@ -3,17 +3,6 @@
  *
  * Takes a base product definition and generates all color × size combinations
  * with unique SKUs, ready for bulk database insertion.
- *
- * Usage:
- *   const { generateVariants, previewVariants } = require('./variantGenerator');
- *   const variants = await generateVariants(db, {
- *     name: 'Nike Air Force 1',
- *     brand: 'Nike',
- *     colors: ['White', 'Black'],
- *     sizes: ['40', '41', '42'],
- *     minPrice: 5000,
- *     stock: 10,
- *   });
  */
 
 const { generateSKU, ensureUniqueSKU } = require('./skuGenerator');
@@ -63,6 +52,8 @@ function generateVariantDefinitions(product) {
     const defaultStock = stockMap && Object.keys(stockMap).length > 0 
       ? Object.values(stockMap)[0] || parseInt(stock) || 0
       : parseInt(stock) || 0;
+    
+    if (defaultStock === 0) return [];
     
     return [{
       name: name.trim(),
@@ -216,15 +207,22 @@ function validateProductInput(product) {
     errors.push('Brand name is required');
   }
 
-  if (!product.minPrice || parseFloat(product.minPrice) <= 0) {
+  // Handle both minPrice and min_price field names
+  const minPriceValue = product.minPrice !== undefined ? product.minPrice : product.min_price;
+  if (minPriceValue === undefined || minPriceValue === null || parseFloat(minPriceValue) <= 0) {
     errors.push('Minimum price must be greater than 0');
   }
 
-  if ((!product.colors || product.colors.length === 0) && (!product.stockMap || Object.keys(product.stockMap).length === 0)) {
+  // Check if there's any stock to create
+  const hasColors = product.colors && product.colors.length > 0;
+  const hasSizes = product.sizes && product.sizes.length > 0;
+  const hasStockMap = product.stockMap && Object.keys(product.stockMap).length > 0;
+  
+  if (!hasColors && !hasStockMap) {
     warnings.push('No colors specified — a single "Default" variant will be created');
   }
 
-  if ((!product.sizes || product.sizes.length === 0) && (!product.stockMap || Object.keys(product.stockMap).length === 0)) {
+  if (!hasSizes && !hasStockMap) {
     warnings.push('No sizes specified — a single "One Size" variant will be created');
   }
 
