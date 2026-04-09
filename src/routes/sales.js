@@ -7,6 +7,18 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
+// ── Startup: log current payment_method constraint ──────────────
+db.query(`
+  SELECT pg_get_constraintdef(oid) AS def
+  FROM pg_constraint
+  WHERE conrelid = 'sales'::regclass
+    AND contype = 'c'
+    AND conname LIKE '%payment_method%'
+`).then(({ rows }) => {
+  if (rows.length) console.log('[sales] payment_method constraint:', rows[0].def);
+  else console.warn('[sales] WARNING: no payment_method constraint found — constraint may be missing!');
+}).catch(() => {});
+
 // ── POST /api/sales ──────────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
   const client = await db.connect();
@@ -14,14 +26,14 @@ router.post('/', requireAuth, async (req, res) => {
     await client.query('BEGIN');
 
     const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
-    // Accept 'phone' from frontend
-    const phone = req.body.phone || null;
-    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'Tuma' → 'Tuma'
-    const payment_method = req.body.payment_method === 'Tuma' ? 'Tuma' : req.body.payment_method;
+    // Accept both 'phone' and 'mpesa_phone' from frontend
+    const phone = req.body.phone || req.body.mpesa_phone || null;
+    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'M-Pesa' → 'Tuma'
+    const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
-    if (!['Cash', 'Tuma', 'Split'].includes(req.body.payment_method))
+    if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(req.body.payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
 
     // Get cashier's commission rate
@@ -66,21 +78,20 @@ router.post('/', requireAuth, async (req, res) => {
     const tumaPortionNum = parseFloat(tuma_portion || mpesa_portion) || 0;
 
     let saleStatus;
-    // Use pending_tuma for Tuma/Tuma payments to match DB CHECK constraint
-    if (payment_method === 'Tuma') saleStatus = 'pending_tuma';
+    // Use pending_tuma for M-Pesa/Tuma payments to match DB CHECK constraint
+    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
-
-    console.log('🔴 PAYMENT METHOD BEING SAVED:', payment_method);
 
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
-          change_given, extra_profit, commission, commission_rate
-          , phone, store_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+          change_given, extra_profit, commission, commission_rate,
+          mpesa_phone, phone, store_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
-        changeGiven, extraProfit, totalCommission, commissionRate, phone || null,
+        changeGiven, extraProfit, totalCommission, commissionRate,
+        phone || null, phone || null,
         req.user.store_id || null, saleStatus]
     );
     const saleId = saleRow.id;
@@ -146,7 +157,8 @@ router.post('/', requireAuth, async (req, res) => {
     console.error('[sales] POST:', err.message);
     if (err.message.includes('Insufficient') || err.message.includes('below minimum') || err.message.includes('not found'))
       return res.status(422).json({ error: err.message });
-    res.status(500).json({ error: 'Failed to record sale' });
+    // Return actual DB error in message so we can diagnose — remove after fix
+    res.status(500).json({ error: 'Failed to record sale', detail: err.message });
   } finally {
     client.release();
   }
