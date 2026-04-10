@@ -84,42 +84,60 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
     const ref = req.params.ref?.trim()?.toUpperCase();
     
     if (!ref) {
-      return res.status(400).json({ error: 'Transaction reference is required' });
+      return res.status(400).json({ 
+        success: false,
+        error: 'Transaction reference is required' 
+      });
     }
     
     console.log(`[Returns Lookup] Searching for: ${ref}`);
     
-    // Check if the sales table has the required columns
-    // Some databases might have 'created_at' vs 'sale_date'
+    // First, check if the sale exists with a simpler query
+    let sale = null;
     let saleQuery = `
       SELECT 
-        s.*,
+        s.id,
+        s.txn_id,
+        s.cashier_id,
+        s.store_id,
+        s.selling_total,
+        s.amount_paid,
+        s.status,
+        s.created_at,
+        s.phone,
+        s.tuma_ref,
+        s.mpesa_ref,
         u.name AS cashier_name,
         st.name AS store_name
       FROM sales s
-      JOIN users u ON u.id = s.cashier_id
+      LEFT JOIN users u ON u.id = s.cashier_id
       LEFT JOIN stores st ON st.id = s.store_id
-      WHERE (UPPER(s.txn_id) = $1 OR UPPER(s.tuma_ref) = $1 OR UPPER(s.mpesa_ref) = $1)
+      WHERE (s.txn_id = $1 OR s.tuma_ref = $1 OR s.mpesa_ref = $1)
         AND s.status = 'completed'
+      LIMIT 1
     `;
     
     const { rows: sales } = await db.query(saleQuery, [ref]);
     
     if (sales.length === 0) {
       return res.status(404).json({ 
+        success: false,
         error: `No completed sale found for "${ref}"`,
         message: 'Please check the transaction ID and try again'
       });
     }
     
-    const sale = sales[0];
+    sale = sales[0];
     
     // Restrict admin to their own store
     if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
-      return res.status(403).json({ error: 'This sale belongs to a different store' });
+      return res.status(403).json({ 
+        success: false,
+        error: 'This sale belongs to a different store' 
+      });
     }
     
-    // Get return window from settings (use 'return_window_days' or default to 30)
+    // Get return window from settings (with fallback)
     let windowDays = 30;
     try {
       const { rows: [windowRow] } = await db.query(
@@ -130,52 +148,63 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       console.warn('[Returns Lookup] Could not fetch return window, using default 30 days');
     }
     
-    // Use created_at or sale_date (handle both column names)
-    const saleDateField = sale.created_at ? 'created_at' : (sale.sale_date ? 'sale_date' : null);
-    if (!saleDateField) {
-      console.error('[Returns Lookup] Sale has no date field:', sale);
-      return res.status(500).json({ error: 'Sale record has no date information' });
-    }
-    
-    const saleDate = new Date(sale[saleDateField]);
-    const diffDays = Math.floor((Date.now() - saleDate.getTime()) / 86400000);
+    // Calculate days since sale
+    const saleDate = new Date(sale.created_at);
+    const now = new Date();
+    const diffDays = Math.floor((now - saleDate) / (1000 * 60 * 60 * 24));
     const withinWindow = diffDays <= windowDays;
     
-    // Load sale items with any already-returned quantities
+    // Get sale items with return quantities
     const { rows: items } = await db.query(`
       SELECT 
-        si.*,
+        si.id,
+        si.product_id,
+        si.product_name,
+        si.size,
+        si.qty,
+        si.unit_price,
+        si.total_price,
+        si.sku,
         COALESCE((
-          SELECT SUM(ri.qty) FROM return_items ri
+          SELECT SUM(ri.qty) 
+          FROM return_items ri
           JOIN returns ret ON ret.id = ri.return_id
-          WHERE ri.sale_item_id = si.id AND ret.status != 'rejected'
+          WHERE ri.sale_item_id = si.id 
+            AND ret.status IN ('completed', 'pending_approval')
         ), 0) AS already_returned
       FROM sale_items si 
       WHERE si.sale_id = $1
     `, [sale.id]);
     
-    // Check if any items have already been fully returned
-    const itemsWithReturnable = items.map(i => ({
-      ...i,
-      returnable_qty: Math.max(0, i.qty - (parseInt(i.already_returned) || 0))
+    // Calculate returnable quantities
+    const itemsWithReturnable = items.map(item => ({
+      ...item,
+      returnable_qty: Math.max(0, item.qty - (parseInt(item.already_returned) || 0)),
+      unit_price: parseFloat(item.unit_price) || 0,
+      total_price: parseFloat(item.total_price) || 0
     }));
     
-    const hasReturnableItems = itemsWithReturnable.some(i => i.returnable_qty > 0);
+    const hasReturnableItems = itemsWithReturnable.some(item => item.returnable_qty > 0);
     
-    res.json({
+    // Check if already fully returned
+    const isFullyReturned = itemsWithReturnable.length > 0 && 
+      itemsWithReturnable.every(item => item.returnable_qty === 0);
+    
+    // Prepare response
+    const response = {
       success: true,
       sale: {
         id: sale.id,
         txn_id: sale.txn_id,
         cashier_id: sale.cashier_id,
         store_id: sale.store_id,
-        selling_total: sale.selling_total,
-        amount_paid: sale.amount_paid,
+        selling_total: parseFloat(sale.selling_total) || 0,
+        amount_paid: parseFloat(sale.amount_paid) || 0,
         status: sale.status,
-        created_at: sale[saleDateField],
+        created_at: sale.created_at,
         phone: sale.phone,
-        cashier_name: sale.cashier_name,
-        store_name: sale.store_name,
+        cashier_name: sale.cashier_name || 'Unknown',
+        store_name: sale.store_name || 'Main Store',
         tuma_ref: sale.tuma_ref,
         mpesa_ref: sale.mpesa_ref,
       },
@@ -184,24 +213,50 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       within_window: withinWindow,
       days_since_sale: diffDays,
       has_returnable_items: hasReturnableItems,
-      message: !withinWindow ? `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.` : null,
-    });
+      is_fully_returned: isFullyReturned,
+      can_return: withinWindow && hasReturnableItems && !isFullyReturned,
+      message: null
+    };
+    
+    // Add appropriate message
+    if (!withinWindow) {
+      response.message = `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.`;
+    } else if (isFullyReturned) {
+      response.message = 'All items from this sale have already been returned.';
+    } else if (!hasReturnableItems) {
+      response.message = 'No items available for return.';
+    }
+    
+    console.log(`[Returns Lookup] Found sale ${sale.txn_id} with ${itemsWithReturnable.length} items`);
+    
+    res.json(response);
     
   } catch (err) {
     console.error('[returns] lookup error:', err.message);
     console.error('[returns] lookup stack:', err.stack);
     
     // Check for specific database errors
+    if (err.code === 'ECONNREFUSED') {
+      return res.status(503).json({ 
+        success: false,
+        error: 'Database connection failed',
+        message: 'Please try again later'
+      });
+    }
+    
     if (err.message.includes('column') && err.message.includes('does not exist')) {
+      const missingColumn = err.message.match(/column "([^"]+)"/)?.[1] || 'unknown';
       return res.status(500).json({ 
-        error: 'Database schema mismatch',
-        message: 'Please contact support: missing required column',
+        success: false,
+        error: 'Database schema issue',
+        message: `Missing column: ${missingColumn}`,
         details: process.env.NODE_ENV === 'development' ? err.message : undefined
       });
     }
     
     res.status(500).json({ 
-      error: 'Lookup failed',
+      success: false,
+      error: 'Failed to lookup transaction',
       message: err.message,
       details: process.env.NODE_ENV === 'development' ? err.stack : undefined
     });
@@ -243,12 +298,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       console.warn('[returns POST] Using default return window');
     }
     
-    const saleDateField = sale.created_at ? 'created_at' : (sale.sale_date ? 'sale_date' : null);
-    if (!saleDateField) {
-      throw new Error('Sale has no date field');
-    }
-    
-    const diffDays = Math.floor((Date.now() - new Date(sale[saleDateField]).getTime()) / 86400000);
+    const diffDays = Math.floor((Date.now() - new Date(sale.created_at).getTime()) / 86400000);
     if (diffDays > windowDays) {
       return res.status(400).json({ 
         error: `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.` 
@@ -281,7 +331,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         throw new Error(`Cannot return ${item.qty} of "${si.product_name}" — only ${maxReturnable} available to return`);
       }
 
-      totalRefund += parseFloat(si.unit_price || si.selling_price || 0) * item.qty;
+      const unitPrice = parseFloat(si.unit_price || si.selling_price || 0);
+      totalRefund += unitPrice * item.qty;
       processedItems.push({
         sale_item_id: si.id,
         product_id:   si.product_id,
@@ -289,7 +340,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         sku:          si.sku,
         size:         si.size,
         qty:          item.qty,
-        refund_price: parseFloat(si.unit_price || si.selling_price || 0),
+        refund_price: unitPrice,
         restock:      item.restock !== false,
         condition:    item.condition || 'good',
       });
@@ -428,17 +479,23 @@ router.put('/:id/reject', requireAuth, ADMIN, async (req, res) => {
       return res.status(400).json({ error: 'Cannot reject a completed return' });
     }
 
+    const rejectReason = req.body.reason || 'No reason given';
+    const newNotes = ret.notes 
+      ? `${ret.notes}\n[Rejected: ${rejectReason}]`
+      : `[Rejected: ${rejectReason}]`;
+
     await db.query(
-      `UPDATE returns SET status='rejected', approved_by=$1, notes=COALESCE(notes,'')||$2 WHERE id=$3`,
-      [req.user.id, ` [Rejected: ${req.body.reason || 'No reason given'}]`, ret.id]
+      `UPDATE returns SET status='rejected', approved_by=$1, notes=$2 WHERE id=$3`,
+      [req.user.id, newNotes, ret.id]
     );
 
     await log(req.user.id, req.user.name, req.user.role, 'return_rejected',
-      ret.return_ref, req.body.reason || 'No reason', 'sale', req.ip);
+      ret.return_ref, rejectReason, 'sale', req.ip);
 
     res.json({ 
       success: true,
-      message: 'Return rejected' 
+      message: 'Return rejected',
+      return_ref: ret.return_ref
     });
   } catch (err) {
     console.error('[returns] reject error:', err.message);
