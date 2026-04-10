@@ -17,10 +17,9 @@
  * Fixes applied:
  *  1. sales.created_at → sales.sale_date  (created_at does not exist on sales table)
  *  2. unit_price → selling_price          (unit_price does not exist on sale_items table)
- *  3. db.getConnection() → db.connect()   (pg driver API; was mysql2 pattern)
- *     conn.beginTransaction/commit/rollback → conn.query('BEGIN/COMMIT/ROLLBACK')
+ *  3. approved_by → actioned_by on reject (semantically correct)
  *  4. Reject route wrapped in transaction for consistency
- *  5. approved_by → actioned_by on reject (semantically correct column usage)
+ *  Note: db.getConnection() is correct — connection.js implements it natively.
  */
 
 const express    = require('express');
@@ -44,8 +43,6 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
       where += ` AND r.store_id = $${idx++}`;
       vals.push(req.user.store_id);
     }
-    // FIX 1: use sale_date instead of created_at for date filtering on sales;
-    // returns table still uses created_at (it has that column)
     if (from) { where += ` AND DATE(r.created_at) >= $${idx++}`; vals.push(from); }
     if (to)   { where += ` AND DATE(r.created_at) <= $${idx++}`; vals.push(to); }
 
@@ -102,7 +99,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
 
     console.log(`[Returns Lookup] Searching for: ${ref}`);
 
-    // FIX 1: select sale_date instead of created_at (sales table has no created_at)
+    // FIX 1: select sale_date (sales table has no created_at column)
     const saleQuery = `
       SELECT
         s.id,
@@ -158,12 +155,12 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
     }
 
     // FIX 1: use sale_date (the actual column) instead of created_at
-    const saleDate   = new Date(sale.sale_date);
-    const now        = new Date();
-    const diffDays   = Math.floor((now - saleDate) / (1000 * 60 * 60 * 24));
+    const saleDate     = new Date(sale.sale_date);
+    const now          = new Date();
+    const diffDays     = Math.floor((now - saleDate) / (1000 * 60 * 60 * 24));
     const withinWindow = diffDays <= windowDays;
 
-    // FIX 2: select selling_price (not unit_price — that column does not exist on sale_items)
+    // FIX 2: use selling_price aliased as unit_price (unit_price column does not exist)
     const { rows: items } = await db.query(`
       SELECT
         si.id,
@@ -198,25 +195,24 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
     const response = {
       success: true,
       sale: {
-        id:           sale.id,
-        txn_id:       sale.txn_id,
-        cashier_id:   sale.cashier_id,
-        store_id:     sale.store_id,
+        id:            sale.id,
+        txn_id:        sale.txn_id,
+        cashier_id:    sale.cashier_id,
+        store_id:      sale.store_id,
         selling_total: parseFloat(sale.selling_total) || 0,
-        amount_paid:  parseFloat(sale.amount_paid) || 0,
-        status:       sale.status,
-        // FIX 1: expose as sale_date to keep API consistent with DB column name
-        sale_date:    sale.sale_date,
-        phone:        sale.phone,
-        cashier_name: sale.cashier_name || 'Unknown',
-        store_name:   sale.store_name   || 'Main Store',
-        tuma_ref:     sale.tuma_ref,
-        mpesa_ref:    sale.mpesa_ref,
+        amount_paid:   parseFloat(sale.amount_paid)   || 0,
+        status:        sale.status,
+        sale_date:     sale.sale_date,
+        phone:         sale.phone,
+        cashier_name:  sale.cashier_name || 'Unknown',
+        store_name:    sale.store_name   || 'Main Store',
+        tuma_ref:      sale.tuma_ref,
+        mpesa_ref:     sale.mpesa_ref,
       },
-      items:              itemsWithReturnable,
-      return_window_days: windowDays,
-      within_window:      withinWindow,
-      days_since_sale:    diffDays,
+      items:                itemsWithReturnable,
+      return_window_days:   windowDays,
+      within_window:        withinWindow,
+      days_since_sale:      diffDays,
       has_returnable_items: hasReturnableItems,
       is_fully_returned:    isFullyReturned,
       can_return: withinWindow && hasReturnableItems && !isFullyReturned,
@@ -267,18 +263,16 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
 
 // ── POST /api/returns ─────────────────────────────────────────────
 router.post('/', requireAuth, ADMIN, async (req, res) => {
-  // FIX 3: use pg connection API — db.connect() not db.getConnection()
-  const conn = await db.connect();
+  const conn = await db.getConnection();
   try {
-    await conn.query('BEGIN');
+    await conn.beginTransaction();
 
     const { original_sale_id, items, reason, notes } = req.body;
     if (!original_sale_id || !items?.length) {
       return res.status(400).json({ error: 'original_sale_id and items are required' });
     }
 
-    // Load sale
-    // FIX 1: select sale_date (not created_at)
+    // Load sale — FIX 1: sale_date not created_at
     const { rows: [sale] } = await conn.query(
       'SELECT * FROM sales WHERE id = $1 AND status = $2', [original_sale_id, 'completed']
     );
@@ -338,7 +332,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         );
       }
 
-      // FIX 2: use selling_price (unit_price column does not exist on sale_items)
+      // FIX 2: use selling_price (unit_price does not exist on sale_items)
       const unitPrice = parseFloat(si.selling_price || 0);
       totalRefund += unitPrice * item.qty;
       processedItems.push({
@@ -397,7 +391,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       }
     }
 
-    await conn.query('COMMIT');
+    await conn.commit();
 
     await log(req.user.id, req.user.name, req.user.role, 'return_processed',
       returnRef, `KES ${totalRefund} — ${processedItems.length} item(s) — ${status}`, 'sale', req.ip);
@@ -414,7 +408,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         : `Return processed. KES ${totalRefund} to be refunded.`,
     });
   } catch (err) {
-    await conn.query('ROLLBACK');
+    await conn.rollback();
     console.error('[returns] POST error:', err.message);
     console.error('[returns] POST stack:', err.stack);
 
@@ -429,10 +423,9 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
 // ── PUT /api/returns/:id/approve ──────────────────────────────────
 router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
-  // FIX 3: use pg connection API
-  const conn = await db.connect();
+  const conn = await db.getConnection();
   try {
-    await conn.query('BEGIN');
+    await conn.beginTransaction();
 
     const { rows: [ret] } = await conn.query('SELECT * FROM returns WHERE id = $1', [req.params.id]);
     if (!ret) {
@@ -460,7 +453,7 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
       }
     }
 
-    await conn.query('COMMIT');
+    await conn.commit();
 
     await log(req.user.id, req.user.name, req.user.role, 'return_approved',
       ret.return_ref, `Approved by ${req.user.name}`, 'sale', req.ip);
@@ -471,7 +464,7 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
       return_ref: ret.return_ref,
     });
   } catch (err) {
-    await conn.query('ROLLBACK');
+    await conn.rollback();
     console.error('[returns] approve error:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
@@ -481,11 +474,10 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
 
 // ── PUT /api/returns/:id/reject ───────────────────────────────────
 router.put('/:id/reject', requireAuth, ADMIN, async (req, res) => {
-  // FIX 3: use pg connection API
-  // FIX 4: wrap in transaction for consistency (previously had no transaction at all)
-  const conn = await db.connect();
+  // FIX 4: wrapped in transaction for consistency
+  const conn = await db.getConnection();
   try {
-    await conn.query('BEGIN');
+    await conn.beginTransaction();
 
     const { rows: [ret] } = await conn.query('SELECT * FROM returns WHERE id = $1', [req.params.id]);
     if (!ret) {
@@ -500,13 +492,13 @@ router.put('/:id/reject', requireAuth, ADMIN, async (req, res) => {
       ? `${ret.notes}\n[Rejected: ${rejectReason}]`
       : `[Rejected: ${rejectReason}]`;
 
-    // FIX 5: use actioned_by instead of approved_by for rejections (semantically correct)
+    // FIX 3: actioned_by instead of approved_by for rejections
     await conn.query(
       `UPDATE returns SET status='rejected', actioned_by=$1, notes=$2 WHERE id=$3`,
       [req.user.id, newNotes, ret.id]
     );
 
-    await conn.query('COMMIT');
+    await conn.commit();
 
     await log(req.user.id, req.user.name, req.user.role, 'return_rejected',
       ret.return_ref, rejectReason, 'sale', req.ip);
@@ -517,7 +509,7 @@ router.put('/:id/reject', requireAuth, ADMIN, async (req, res) => {
       return_ref: ret.return_ref,
     });
   } catch (err) {
-    await conn.query('ROLLBACK');
+    await conn.rollback();
     console.error('[returns] reject error:', err.message);
     res.status(500).json({ error: err.message });
   } finally {

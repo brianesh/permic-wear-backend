@@ -36,7 +36,7 @@ function wrapQuery(queryFn) {
     // Build array [rows, fields] with .rows and .insertId attached
     // This satisfies BOTH [[row]] destructuring AND { rows } destructuring
     const ret = [rows, result.fields || []];
-    ret.rows    = rows;
+    ret.rows     = rows;
     ret.insertId = rows[0]?.id ?? null;
     return ret;
   };
@@ -44,14 +44,23 @@ function wrapQuery(queryFn) {
 
 pool.query = wrapQuery(pool.query.bind(pool));
 
+// FIX: Force search_path to public on every new connection.
+// Without this, Supabase's 'authenticator' role (used by the app) has no
+// search_path set, so it cannot resolve tables in the public schema.
+pool.on('connect', client => {
+  client.query("SET search_path TO public, extensions");
+});
+
 // MySQL-like getConnection for transactions
 pool.getConnection = async () => {
   const client = await pool.connect();
-  client.query          = wrapQuery(client.query.bind(client));
+  // Also set search_path on transaction clients
+  await client.query("SET search_path TO public, extensions");
+  client.query            = wrapQuery(client.query.bind(client));
   client.beginTransaction = () => client.query('BEGIN');
-  client.commit          = () => client.query('COMMIT');
-  client.rollback        = () => client.query('ROLLBACK');
-  client.release         = client.release.bind(client);
+  client.commit           = () => client.query('COMMIT');
+  client.rollback         = () => client.query('ROLLBACK');
+  client.release          = client.release.bind(client);
   return client;
 };
 
