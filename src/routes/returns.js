@@ -1,6 +1,6 @@
 /**
  * returns.js — Returns & Refunds
- * Uses only existing columns - no extra tables or columns needed
+ * Simple version - no length issues
  */
 
 const express = require('express');
@@ -102,7 +102,6 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             WHERE sale_id = $1
         `, [sale.id]);
 
-        // All items are returnable (no returns table to check)
         const itemsWithReturnable = items.map(item => ({
             id: item.id,
             sale_item_id: item.id,
@@ -131,7 +130,6 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             return_window_days: RETURN_WINDOW_DAYS,
             within_window: withinWindow,
             days_since_sale: daysSinceSale,
-            months_since_sale: Math.floor(daysSinceSale / 30),
             can_return: withinWindow,
             message: withinWindow ? null : `Return window expired (${RETURN_WINDOW_DAYS} days / 4 months)`
         });
@@ -223,27 +221,29 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             console.log(`[Returns] Restocked ${item.qty} of ${saleItem.product_name}`);
         }
 
-        // Create a return record as a negative sale
-        const returnRef = `RET-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+        // Create a return reference (short to avoid length issues)
+        const timestamp = Date.now().toString().slice(-8);
+        const random = Math.random().toString(36).slice(2, 6).toUpperCase();
+        const returnRef = `RET-${timestamp}${random}`;
         
+        // Insert return record with safe values
         await query(`
             INSERT INTO sales 
             (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid, status, sale_date)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
         `, [
             returnRef,
             req.user.id,
             sale.store_id,
-            'RETURN',
+            'return',  // Using 'return' instead of 'RETURN' (shorter, safer)
             -totalRefund,
             -totalRefund,
-            'completed',
-            new Date()
+            'completed'
         ]);
 
-        // Log the return
+        // Log the return (reason is logged but not stored in sales)
         await log(req.user.id, req.user.name, req.user.role, 'return_processed',
-            returnRef, `KES ${totalRefund} — ${returnedItems.length} item(s) returned, Reason: ${reason || 'None'}`, 'sale', req.ip);
+            returnRef, `KES ${totalRefund} — ${returnedItems.length} item(s) returned. Reason: ${reason || 'None'}`, 'sale', req.ip);
 
         console.log(`[Returns] Return completed: ${returnRef}, refund: KES ${totalRefund}`);
 
@@ -257,6 +257,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
     } catch (err) {
         console.error('[Returns] POST error:', err.message);
+        console.error('[Returns] Stack:', err.stack);
         res.status(500).json({ error: 'Return processing failed: ' + err.message });
     }
 });
@@ -264,7 +265,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 // ── GET /api/returns ──────────────────────────────────────────────
 router.get('/', requireAuth, ADMIN, async (req, res) => {
     try {
-        // Get all return transactions (sales with payment_method = 'RETURN')
+        // Get all return transactions
         const returns = await query(`
             SELECT 
                 s.id,
@@ -277,7 +278,7 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
             FROM sales s
             JOIN users u ON u.id = s.cashier_id
             LEFT JOIN stores st ON st.id = s.store_id
-            WHERE s.payment_method = 'RETURN'
+            WHERE s.payment_method = 'return'
             ORDER BY s.sale_date DESC
             LIMIT 50
         `);
