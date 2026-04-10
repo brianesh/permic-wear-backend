@@ -6,13 +6,6 @@
  * POST /api/returns             → process a return
  * PUT  /api/returns/:id/approve → approve a pending return (admin+)
  * PUT  /api/returns/:id/reject  → reject a pending return (admin+)
- *
- * Rules enforced:
- *  - Return window: configurable (default 30 days)
- *  - High-value returns above threshold require manager approval
- *  - Must match original receipt
- *  - Cashiers cannot process returns (admin+ only)
- *  - Restock adds back to inventory; damaged items do not
  */
 
 const express    = require('express');
@@ -78,7 +71,6 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
 });
 
 // ── GET /api/returns/lookup/:ref ──────────────────────────────────
-// Used by the return UI to load a past sale by receipt ID or TXN
 router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
   try {
     const ref = req.params.ref?.trim()?.toUpperCase();
@@ -92,9 +84,8 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
     
     console.log(`[Returns Lookup] Searching for: ${ref}`);
     
-    // First, check if the sale exists with a simpler query
-    let sale = null;
-    let saleQuery = `
+    // Query using your actual sales table schema
+    const { rows: sales } = await db.query(`
       SELECT 
         s.id,
         s.txn_id,
@@ -103,10 +94,12 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
         s.selling_total,
         s.amount_paid,
         s.status,
-        s.created_at,
+        s.sale_date,
         s.phone,
         s.tuma_ref,
         s.mpesa_ref,
+        s.mpesa_phone,
+        s.mpesa_portion,
         u.name AS cashier_name,
         st.name AS store_name
       FROM sales s
@@ -115,9 +108,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       WHERE (s.txn_id = $1 OR s.tuma_ref = $1 OR s.mpesa_ref = $1)
         AND s.status = 'completed'
       LIMIT 1
-    `;
-    
-    const { rows: sales } = await db.query(saleQuery, [ref]);
+    `, [ref]);
     
     if (sales.length === 0) {
       return res.status(404).json({ 
@@ -127,7 +118,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       });
     }
     
-    sale = sales[0];
+    const sale = sales[0];
     
     // Restrict admin to their own store
     if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
@@ -148,13 +139,13 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       console.warn('[Returns Lookup] Could not fetch return window, using default 30 days');
     }
     
-    // Calculate days since sale
-    const saleDate = new Date(sale.created_at);
+    // Calculate days since sale (using sale_date from your schema)
+    const saleDate = new Date(sale.sale_date);
     const now = new Date();
     const diffDays = Math.floor((now - saleDate) / (1000 * 60 * 60 * 24));
     const withinWindow = diffDays <= windowDays;
     
-    // Get sale items with return quantities
+    // Get sale items using your actual sale_items schema
     const { rows: items } = await db.query(`
       SELECT 
         si.id,
@@ -162,8 +153,8 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
         si.product_name,
         si.size,
         si.qty,
-        si.unit_price,
-        si.total_price,
+        si.selling_price,
+        si.min_price,
         si.sku,
         COALESCE((
           SELECT SUM(ri.qty) 
@@ -178,15 +169,19 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
     
     // Calculate returnable quantities
     const itemsWithReturnable = items.map(item => ({
-      ...item,
-      returnable_qty: Math.max(0, item.qty - (parseInt(item.already_returned) || 0)),
-      unit_price: parseFloat(item.unit_price) || 0,
-      total_price: parseFloat(item.total_price) || 0
+      id: item.id,
+      product_id: item.product_id,
+      product_name: item.product_name,
+      size: item.size,
+      qty: item.qty,
+      selling_price: parseFloat(item.selling_price) || 0,
+      min_price: parseFloat(item.min_price) || 0,
+      sku: item.sku,
+      already_returned: parseInt(item.already_returned) || 0,
+      returnable_qty: Math.max(0, item.qty - (parseInt(item.already_returned) || 0))
     }));
     
     const hasReturnableItems = itemsWithReturnable.some(item => item.returnable_qty > 0);
-    
-    // Check if already fully returned
     const isFullyReturned = itemsWithReturnable.length > 0 && 
       itemsWithReturnable.every(item => item.returnable_qty === 0);
     
@@ -201,8 +196,8 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
         selling_total: parseFloat(sale.selling_total) || 0,
         amount_paid: parseFloat(sale.amount_paid) || 0,
         status: sale.status,
-        created_at: sale.created_at,
-        phone: sale.phone,
+        sale_date: sale.sale_date,
+        phone: sale.phone || sale.mpesa_phone,
         cashier_name: sale.cashier_name || 'Unknown',
         store_name: sale.store_name || 'Main Store',
         tuma_ref: sale.tuma_ref,
@@ -227,32 +222,13 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
       response.message = 'No items available for return.';
     }
     
-    console.log(`[Returns Lookup] Found sale ${sale.txn_id} with ${itemsWithReturnable.length} items`);
+    console.log(`[Returns Lookup] Found sale ${sale.txn_id} with ${itemsWithReturnable.filter(i => i.returnable_qty > 0).length} returnable items`);
     
     res.json(response);
     
   } catch (err) {
     console.error('[returns] lookup error:', err.message);
     console.error('[returns] lookup stack:', err.stack);
-    
-    // Check for specific database errors
-    if (err.code === 'ECONNREFUSED') {
-      return res.status(503).json({ 
-        success: false,
-        error: 'Database connection failed',
-        message: 'Please try again later'
-      });
-    }
-    
-    if (err.message.includes('column') && err.message.includes('does not exist')) {
-      const missingColumn = err.message.match(/column "([^"]+)"/)?.[1] || 'unknown';
-      return res.status(500).json({ 
-        success: false,
-        error: 'Database schema issue',
-        message: `Missing column: ${missingColumn}`,
-        details: process.env.NODE_ENV === 'development' ? err.message : undefined
-      });
-    }
     
     res.status(500).json({ 
       success: false,
@@ -287,7 +263,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       return res.status(403).json({ error: 'Sale belongs to a different store' });
     }
 
-    // Return window check
+    // Return window check using sale_date
     let windowDays = 30;
     try {
       const { rows: [windowRow] } = await conn.query(
@@ -298,7 +274,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       console.warn('[returns POST] Using default return window');
     }
     
-    const diffDays = Math.floor((Date.now() - new Date(sale.created_at).getTime()) / 86400000);
+    const diffDays = Math.floor((Date.now() - new Date(sale.sale_date).getTime()) / 86400000);
     if (diffDays > windowDays) {
       return res.status(400).json({ 
         error: `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.` 
@@ -331,8 +307,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         throw new Error(`Cannot return ${item.qty} of "${si.product_name}" — only ${maxReturnable} available to return`);
       }
 
-      const unitPrice = parseFloat(si.unit_price || si.selling_price || 0);
-      totalRefund += unitPrice * item.qty;
+      const refundPrice = parseFloat(si.selling_price) || 0;
+      totalRefund += refundPrice * item.qty;
       processedItems.push({
         sale_item_id: si.id,
         product_id:   si.product_id,
@@ -340,7 +316,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         sku:          si.sku,
         size:         si.size,
         qty:          item.qty,
-        refund_price: unitPrice,
+        refund_price: refundPrice,
         restock:      item.restock !== false,
         condition:    item.condition || 'good',
       });
@@ -380,7 +356,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       `, [returnId, item.sale_item_id, item.product_id, item.product_name,
           item.sku, item.size, item.qty, item.refund_price, item.restock, item.condition]);
 
-      // Restock immediately if approved (or super_admin bypass)
+      // Restock immediately if approved
       if (item.restock && item.condition !== 'unsellable' && status === 'completed') {
         await conn.query(
           'UPDATE products SET stock = stock + $1 WHERE id = $2', 
@@ -408,7 +384,6 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
   } catch (err) {
     await conn.rollback();
     console.error('[returns] POST error:', err.message);
-    console.error('[returns] POST stack:', err.stack);
     
     if (err.message.includes('Cannot return') || err.message.includes('window')) {
       return res.status(422).json({ error: err.message });
@@ -438,7 +413,7 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
       [req.user.id, ret.id]
     );
 
-    // Now restock items
+    // Restock items
     const { rows: items } = await conn.query(
       'SELECT * FROM return_items WHERE return_id = $1', [ret.id]
     );
