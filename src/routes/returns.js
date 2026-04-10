@@ -1,6 +1,6 @@
 /**
  * returns.js — Returns & Refunds
- * Simple version - no length issues
+ * Uses allowed payment_method values: Cash, Tuma, M-Pesa, Split
  */
 
 const express = require('express');
@@ -11,10 +11,8 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 const ADMIN = requireRole('super_admin', 'admin');
 
-// Return window: 120 days = 4 months
 const RETURN_WINDOW_DAYS = 120;
 
-// Simple query helper
 async function query(sql, params = []) {
     try {
         const result = await db.query(sql, params);
@@ -41,7 +39,6 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
 
         console.log(`[Returns] Looking up: ${ref}`);
 
-        // Find the sale
         const sales = await query(`
             SELECT 
                 s.id,
@@ -75,7 +72,6 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
 
         const sale = sales[0];
         
-        // Check store access
         if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
             return res.status(403).json({ 
                 success: false, 
@@ -83,12 +79,10 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             });
         }
 
-        // Calculate days since sale
         const saleDate = new Date(sale.sale_date);
         const daysSinceSale = Math.floor((Date.now() - saleDate) / (1000 * 60 * 60 * 24));
         const withinWindow = daysSinceSale <= RETURN_WINDOW_DAYS;
 
-        // Get sale items
         const items = await query(`
             SELECT 
                 id,
@@ -157,7 +151,6 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
         console.log(`[Returns] Processing return for sale ${original_sale_id}`);
 
-        // Get the sale
         const sales = await query(
             'SELECT * FROM sales WHERE id = $1 AND status = $2',
             [original_sale_id, 'completed']
@@ -169,12 +162,10 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
         const sale = sales[0];
 
-        // Check store access
         if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
             return res.status(403).json({ error: 'Sale belongs to a different store' });
         }
 
-        // Check return window
         const saleDate = new Date(sale.sale_date);
         const daysSince = Math.floor((Date.now() - saleDate) / (1000 * 60 * 60 * 24));
         
@@ -184,7 +175,6 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             });
         }
 
-        // Process each item - restock inventory
         let totalRefund = 0;
         const returnedItems = [];
 
@@ -195,18 +185,14 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             );
 
             if (saleItems.length === 0) {
-                return res.status(404).json({ 
-                    error: `Sale item not found` 
-                });
+                return res.status(404).json({ error: `Sale item not found` });
             }
 
             const saleItem = saleItems[0];
-            
-            // Calculate refund
             const refundAmount = parseFloat(saleItem.selling_price || 0) * item.qty;
             totalRefund += refundAmount;
 
-            // RESTOCK INVENTORY - add the returned quantity back to stock
+            // Restock inventory
             await query(
                 'UPDATE products SET stock = stock + $1 WHERE id = $2',
                 [item.qty, saleItem.product_id]
@@ -221,12 +207,9 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             console.log(`[Returns] Restocked ${item.qty} of ${saleItem.product_name}`);
         }
 
-        // Create a return reference (short to avoid length issues)
-        const timestamp = Date.now().toString().slice(-8);
-        const random = Math.random().toString(36).slice(2, 6).toUpperCase();
-        const returnRef = `RET-${timestamp}${random}`;
+        // Create return record with allowed payment_method 'Cash'
+        const returnRef = `RET-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
         
-        // Insert return record with safe values
         await query(`
             INSERT INTO sales 
             (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid, status, sale_date)
@@ -235,13 +218,12 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             returnRef,
             req.user.id,
             sale.store_id,
-            'return',  // Using 'return' instead of 'RETURN' (shorter, safer)
-            -totalRefund,
+            'Cash',  // ✅ Allowed value from constraint
+            -totalRefund,  // Negative = refund
             -totalRefund,
             'completed'
         ]);
 
-        // Log the return (reason is logged but not stored in sales)
         await log(req.user.id, req.user.name, req.user.role, 'return_processed',
             returnRef, `KES ${totalRefund} — ${returnedItems.length} item(s) returned. Reason: ${reason || 'None'}`, 'sale', req.ip);
 
@@ -257,7 +239,6 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
     } catch (err) {
         console.error('[Returns] POST error:', err.message);
-        console.error('[Returns] Stack:', err.stack);
         res.status(500).json({ error: 'Return processing failed: ' + err.message });
     }
 });
@@ -265,12 +246,12 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 // ── GET /api/returns ──────────────────────────────────────────────
 router.get('/', requireAuth, ADMIN, async (req, res) => {
     try {
-        // Get all return transactions
+        // Get all returns (identified by negative selling_total)
         const returns = await query(`
             SELECT 
                 s.id,
                 s.txn_id as return_ref,
-                s.selling_total as total_refund,
+                ABS(s.selling_total) as total_refund,
                 s.status,
                 s.sale_date as created_at,
                 u.name as processed_by_name,
@@ -278,7 +259,7 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
             FROM sales s
             JOIN users u ON u.id = s.cashier_id
             LEFT JOIN stores st ON st.id = s.store_id
-            WHERE s.payment_method = 'return'
+            WHERE s.selling_total < 0
             ORDER BY s.sale_date DESC
             LIMIT 50
         `);
