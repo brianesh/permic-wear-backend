@@ -1,6 +1,6 @@
 /**
- * returns.js — Returns & Refunds (No separate tables needed)
- * Uses existing sales and sale_items tables only
+ * returns.js — Returns & Refunds
+ * Uses only existing columns - no extra tables or columns needed
  */
 
 const express = require('express');
@@ -102,8 +102,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             WHERE sale_id = $1
         `, [sale.id]);
 
-        // Check if items were already returned by looking at a returns column
-        // If no returns table, all items are returnable
+        // All items are returnable (no returns table to check)
         const itemsWithReturnable = items.map(item => ({
             id: item.id,
             sale_item_id: item.id,
@@ -150,7 +149,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
 // ── POST /api/returns ─────────────────────────────────────────────
 router.post('/', requireAuth, ADMIN, async (req, res) => {
     try {
-        const { original_sale_id, items, reason, notes } = req.body;
+        const { original_sale_id, items, reason } = req.body;
 
         if (!original_sale_id || !items?.length) {
             return res.status(400).json({ 
@@ -224,15 +223,13 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             console.log(`[Returns] Restocked ${item.qty} of ${saleItem.product_name}`);
         }
 
-        // Create a return record in sales table (using a new sale with negative amount)
-        // This keeps track of returns without needing a separate table
+        // Create a return record as a negative sale
         const returnRef = `RET-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
         
-        // Option 1: Create a return record in sales with negative amount
         await query(`
             INSERT INTO sales 
-            (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid, status, sale_date, notes)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid, status, sale_date)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `, [
             returnRef,
             req.user.id,
@@ -240,26 +237,13 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             'RETURN',
             -totalRefund,
             -totalRefund,
-            'returned',
-            new Date(),
-            `Return for sale ${sale.txn_id}: ${reason || 'No reason'}`
+            'completed',
+            new Date()
         ]);
-
-        // Option 2: Update the original sale to mark as returned (add a column if exists)
-        // If you have a 'returned_amount' column, update it:
-        try {
-            await query(
-                'UPDATE sales SET notes = COALESCE(notes, \'\') || $1 WHERE id = $2',
-                [`\n[RETURN] ${new Date().toISOString()}: ${returnedItems.length} items returned, KES ${totalRefund} refunded. Reason: ${reason || 'None'}`,
-                original_sale_id]
-            );
-        } catch (err) {
-            console.log('[Returns] Could not update sale notes');
-        }
 
         // Log the return
         await log(req.user.id, req.user.name, req.user.role, 'return_processed',
-            returnRef, `KES ${totalRefund} — ${returnedItems.length} item(s) returned and restocked`, 'sale', req.ip);
+            returnRef, `KES ${totalRefund} — ${returnedItems.length} item(s) returned, Reason: ${reason || 'None'}`, 'sale', req.ip);
 
         console.log(`[Returns] Return completed: ${returnRef}, refund: KES ${totalRefund}`);
 
@@ -268,7 +252,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             return_ref: returnRef,
             total_refund: totalRefund,
             items_returned: returnedItems,
-            message: `Return processed. KES ${totalRefund} refunded. Inventory restocked.`
+            message: `✅ Return processed. KES ${totalRefund} refunded. Inventory restocked.`
         });
 
     } catch (err) {
@@ -288,7 +272,6 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
                 s.selling_total as total_refund,
                 s.status,
                 s.sale_date as created_at,
-                s.notes,
                 u.name as processed_by_name,
                 st.name as store_name
             FROM sales s
