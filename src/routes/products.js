@@ -509,12 +509,106 @@ router.post('/preview-variants', requireAuth, ADMIN, async (req, res) => {
 });
 
 // ── POST /api/products/bulk-create ────────────────────────────────────────────
-// Create multiple product variants (color × size combinations) with auto-generated SKUs
+// Supports two payload shapes:
+//   1. Array of pre-built variant objects (from frontend bulk modal)
+//      [{ name, brand, brand_id, sub_type_id, color, size, stock, minPrice|min_price, sku, top_type, ... }, ...]
+//   2. Single matrix object (legacy / direct API)
+//      { name, brand, colors[], sizes[], stockMap, minPrice, ... }
 router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
   try {
-    const product = req.body;
+    const body = req.body;
 
-    // Validate input
+    // ── Determine store_id ───────────────────────────────────────
+    const getStoreId = (itemStoreId) => {
+      if (req.user.role === 'super_admin') return itemStoreId || null;
+      return req.user.store_id;
+    };
+
+    // ── PATH A: Array of pre-expanded variant objects ────────────
+    if (Array.isArray(body)) {
+      if (body.length === 0) {
+        return res.status(400).json({ error: 'Empty variants array' });
+      }
+
+      // Validate each item has the minimum required fields
+      const validationErrors = [];
+      body.forEach((item, i) => {
+        if (!item.name || !item.name.trim())  validationErrors.push(`Item ${i + 1}: name is required`);
+        if (!item.brand || !item.brand.trim()) validationErrors.push(`Item ${i + 1}: brand is required`);
+        if (!item.sku || !item.sku.trim())    validationErrors.push(`Item ${i + 1}: sku is required`);
+        if (!item.size || !item.size.toString().trim()) validationErrors.push(`Item ${i + 1}: size is required`);
+        const price = item.minPrice !== undefined ? item.minPrice : item.min_price;
+        if (!price || parseFloat(price) <= 0) validationErrors.push(`Item ${i + 1}: minPrice must be > 0`);
+        if (item.stock === undefined || parseInt(item.stock) < 0) validationErrors.push(`Item ${i + 1}: stock cannot be negative`);
+      });
+
+      if (validationErrors.length > 0) {
+        return res.status(400).json({ error: 'Validation failed', details: validationErrors });
+      }
+
+      const insertedIds = [];
+      const errors = [];
+
+      for (const item of body) {
+        try {
+          const price   = item.minPrice !== undefined ? item.minPrice : item.min_price;
+          const storeId = getStoreId(item.store_id);
+
+          const { rows } = await db.query(`
+            INSERT INTO products
+              (name, brand, brand_id, sub_type_id, top_type, category,
+               size, sku, stock, min_price, color, photo_url, store_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (sku) DO UPDATE SET
+              stock      = EXCLUDED.stock,
+              min_price  = EXCLUDED.min_price,
+              brand_id   = EXCLUDED.brand_id,
+              sub_type_id = EXCLUDED.sub_type_id
+            RETURNING id
+          `, [
+            item.name.trim(),
+            item.brand   || 'Other',
+            item.brand_id    ? parseInt(item.brand_id)    : null,
+            item.sub_type_id ? parseInt(item.sub_type_id) : null,
+            item.top_type    || item.topType || 'shoes',
+            item.category    || '',
+            item.size.toString(),
+            item.sku.trim(),
+            parseInt(item.stock) || 0,
+            parseFloat(price),
+            item.color   || '',
+            item.photo_url || null,
+            storeId
+          ]);
+
+          insertedIds.push(rows[0].id);
+        } catch (err) {
+          if (err.code === '23505') {
+            errors.push(`SKU ${item.sku} already exists`);
+          } else {
+            errors.push(`Error creating ${item.color || ''} ${item.size}: ${err.message}`);
+          }
+        }
+      }
+
+      const firstName = body[0]?.name || 'products';
+      await log(req.user.id, req.user.name, req.user.role, 'bulk_product_created',
+        firstName,
+        `Created ${insertedIds.length} variants (${body.length} requested)`,
+        'inventory', req.ip);
+
+      return res.json({
+        message: `Created ${insertedIds.length} of ${body.length} variants`,
+        created: insertedIds.length,
+        total:   body.length,
+        errors:  errors.length > 0 ? errors : undefined,
+        ids:     insertedIds,
+      });
+    }
+
+    // ── PATH B: Single matrix object (legacy) ────────────────────
+    const product = body;
+
     const validation = validateProductInput(product);
     if (!validation.valid) {
       return res.status(400).json({
@@ -524,10 +618,9 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
     }
 
     // Look up brand_id and sub_type_id from database
-    let brandId = product.brand_id || null;
+    let brandId   = product.brand_id   || null;
     let subTypeId = product.sub_type_id || null;
 
-    // If brand name is provided but not brand_id, look it up
     if (!brandId && product.brand) {
       const { rows: [brandRow] } = await db.query(
         'SELECT id FROM brands WHERE name = $1 AND top_type = $2 LIMIT 1',
@@ -536,7 +629,6 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
       if (brandRow) brandId = brandRow.id;
     }
 
-    // If subType name is provided but not sub_type_id, look it up
     if (!subTypeId && product.subType) {
       const { rows: [subTypeRow] } = await db.query(
         'SELECT id FROM sub_types WHERE name = $1 AND brand_id = $2 LIMIT 1',
@@ -545,27 +637,22 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
       if (subTypeRow) subTypeId = subTypeRow.id;
     }
 
-    // Determine store_id - products must be tied to a specific store
-    let storeId = product.store_id;
-    if (req.user.role === 'super_admin') {
-      storeId = storeId || null;
-    } else {
-      storeId = req.user.store_id;
-    }
+    const storeId = getStoreId(product.store_id);
 
     // Generate all variants with unique SKUs
     const variants = await generateVariants(db, {
-      name: product.name,
-      brand: product.brand,
-      brand_id: brandId,
-      subType: product.subType,
-      sub_type_id: subTypeId,
-      colors: product.colors || [],
-      sizes: product.sizes || [],
-      minPrice: product.min_price || product.minPrice,
-      stock: product.stock || 0,
-      category: product.category,
-      topType: product.topType || product.top_type || 'shoes',
+      name:            product.name,
+      brand:           product.brand,
+      brand_id:        brandId,
+      subType:         product.subType,
+      sub_type_id:     subTypeId,
+      colors:          product.colors || [],
+      sizes:           product.sizes  || [],
+      minPrice:        product.min_price || product.minPrice,
+      stock:           product.stock  || 0,
+      stockMap:        product.stockMap || {},
+      category:        product.category,
+      topType:         product.topType || product.top_type || 'shoes',
       distributeStock: product.distributeStock || false,
     });
 
@@ -573,7 +660,6 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
       return res.status(400).json({ error: 'No variants generated' });
     }
 
-    // Insert all variants into database
     const insertedIds = [];
     const errors = [];
 
@@ -585,15 +671,15 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
              size, sku, stock, min_price, color, store_id)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           ON CONFLICT (sku) DO UPDATE SET
-            stock = EXCLUDED.stock,
-            min_price = EXCLUDED.min_price,
-            brand_id = EXCLUDED.brand_id,
+            stock       = EXCLUDED.stock,
+            min_price   = EXCLUDED.min_price,
+            brand_id    = EXCLUDED.brand_id,
             sub_type_id = EXCLUDED.sub_type_id
           RETURNING id
         `, [
           variant.name,
           variant.brand,
-          variant.brand_id || brandId,
+          variant.brand_id    || brandId,
           variant.sub_type_id || subTypeId,
           variant.topType,
           variant.category,
@@ -615,20 +701,20 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
       }
     }
 
-    // Log the bulk creation
     await log(req.user.id, req.user.name, req.user.role, 'bulk_product_created',
       `${product.name}`,
       `Created ${insertedIds.length} variants (${variants.length} requested)`,
       'inventory', req.ip);
 
     res.json({
-      message: `Created ${insertedIds.length} of ${variants.length} variants`,
-      created: insertedIds.length,
-      total: variants.length,
-      errors: errors.length > 0 ? errors : undefined,
+      message:  `Created ${insertedIds.length} of ${variants.length} variants`,
+      created:  insertedIds.length,
+      total:    variants.length,
+      errors:   errors.length > 0 ? errors : undefined,
       warnings: validation.warnings,
-      ids: insertedIds
+      ids:      insertedIds,
     });
+
   } catch (err) {
     console.error('[products] bulk-create:', err.message);
     res.status(500).json({ error: 'Bulk creation failed' });
