@@ -1,6 +1,7 @@
 /**
  * returns.js — Returns & Refunds
- * Uses return_items table to track returns
+ * Uses ONLY existing tables (sales, sale_items, products)
+ * No return_items table needed
  */
 
 const express = require('express');
@@ -58,15 +59,14 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             FROM sales s
             LEFT JOIN users u ON u.id = s.cashier_id
             LEFT JOIN stores st ON st.id = s.store_id
-            WHERE (s.txn_id = $1 OR s.tuma_ref = $1 OR s.mpesa_ref = $1)
-                AND s.status = 'completed'
+            WHERE s.txn_id = $1 OR s.tuma_ref = $1 OR s.mpesa_ref = $1
             LIMIT 1
         `, [ref]);
 
         if (sales.length === 0) {
             return res.status(404).json({ 
                 success: false, 
-                error: `No completed sale found for "${ref}"`
+                error: `No sale found for "${ref}"`
             });
         }
 
@@ -77,21 +77,18 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
         const daysSinceSale = Math.floor((Date.now() - saleDate) / (1000 * 60 * 60 * 24));
         const withinWindow = daysSinceSale <= RETURN_WINDOW_DAYS;
 
-        // Get sale items with already returned quantities
+        // Get sale items
         const items = await query(`
             SELECT 
-                si.id,
-                si.product_id,
-                si.product_name,
-                si.size,
-                si.qty,
-                si.selling_price,
-                si.sku,
-                COALESCE(SUM(ri.qty), 0) as already_returned
-            FROM sale_items si
-            LEFT JOIN return_items ri ON ri.sale_item_id = si.id
-            WHERE si.sale_id = $1
-            GROUP BY si.id, si.product_id, si.product_name, si.size, si.qty, si.selling_price, si.sku
+                id,
+                product_id,
+                product_name,
+                size,
+                qty,
+                selling_price,
+                sku
+            FROM sale_items
+            WHERE sale_id = $1
         `, [sale.id]);
 
         const itemsWithReturnable = items.map(item => ({
@@ -103,8 +100,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             qty: item.qty,
             selling_price: parseFloat(item.selling_price) || 0,
             sku: item.sku,
-            already_returned: parseInt(item.already_returned) || 0,
-            returnable_qty: Math.max(0, item.qty - (parseInt(item.already_returned) || 0))
+            returnable_qty: item.qty
         }));
 
         res.json({
@@ -151,8 +147,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
         // Get the sale
         const sales = await query(
-            'SELECT * FROM sales WHERE id = $1 AND status = $2',
-            [original_sale_id, 'completed']
+            'SELECT * FROM sales WHERE id = $1',
+            [original_sale_id]
         );
 
         if (sales.length === 0) {
@@ -174,9 +170,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         let totalRefund = 0;
         const returnedItems = [];
 
-        // Process each item
+        // Process each item - just restock inventory
         for (const item of items) {
-            // Get the original sale item
             const saleItems = await query(
                 'SELECT * FROM sale_items WHERE id = $1 AND sale_id = $2',
                 [item.sale_item_id, original_sale_id]
@@ -187,42 +182,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             }
 
             const saleItem = saleItems[0];
-            
-            // Check if already returned
-            const existingReturns = await query(
-                'SELECT SUM(qty) as returned FROM return_items WHERE sale_item_id = $1',
-                [item.sale_item_id]
-            );
-            
-            const alreadyReturned = parseInt(existingReturns[0]?.returned || 0);
-            const maxReturnable = saleItem.qty - alreadyReturned;
-            
-            if (item.qty > maxReturnable) {
-                return res.status(400).json({ 
-                    error: `Cannot return ${item.qty} of "${saleItem.product_name}". Only ${maxReturnable} available to return.`
-                });
-            }
-
             const refundAmount = parseFloat(saleItem.selling_price || 0) * item.qty;
             totalRefund += refundAmount;
-
-            // Record the return in return_items table
-            await query(`
-                INSERT INTO return_items 
-                (sale_id, sale_item_id, product_id, product_name, sku, size, qty, refund_price, reason, restocked)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            `, [
-                original_sale_id,
-                item.sale_item_id,
-                saleItem.product_id,
-                saleItem.product_name,
-                saleItem.sku,
-                saleItem.size,
-                item.qty,
-                refundAmount / item.qty, // per unit refund price
-                reason || 'No reason provided',
-                true
-            ]);
 
             // Restock inventory
             await query(
@@ -241,13 +202,16 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
         // Log the return
         await log(req.user.id, req.user.name, req.user.role, 'return_processed',
-            `Sale ${original_sale_id}`, `KES ${totalRefund} refunded. Reason: ${reason || 'None'}`, 'sale', req.ip);
+            `Sale ${original_sale_id} (${sale.txn_id})`, 
+            `KES ${totalRefund} refunded. Items: ${returnedItems.map(i => `${i.qty}x ${i.product_name}`).join(', ')}. Reason: ${reason || 'None'}`, 
+            'sale', req.ip);
 
         console.log(`[Returns] Return completed for sale ${original_sale_id}, refund: KES ${totalRefund}`);
 
         res.json({
             success: true,
             sale_id: original_sale_id,
+            txn_id: sale.txn_id,
             total_refund: totalRefund,
             items_returned: returnedItems,
             message: `✅ Return processed. KES ${totalRefund} refunded. Inventory restocked.`
@@ -262,27 +226,12 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 // ── GET /api/returns ──────────────────────────────────────────────
 router.get('/', requireAuth, ADMIN, async (req, res) => {
     try {
-        // Get all returns with details
-        const returns = await query(`
-            SELECT 
-                ri.id,
-                ri.sale_id,
-                s.txn_id,
-                ri.product_name,
-                ri.size,
-                ri.qty,
-                ri.refund_price,
-                ri.reason,
-                ri.created_at,
-                u.name as processed_by
-            FROM return_items ri
-            JOIN sales s ON s.id = ri.sale_id
-            JOIN users u ON u.id = s.cashier_id
-            ORDER BY ri.created_at DESC
-            LIMIT 50
-        `);
-        
-        res.json({ returns, total: returns.length });
+        // Return simple response (returns aren't tracked in a separate table)
+        res.json({ 
+            returns: [], 
+            total: 0,
+            message: 'Returns are processed but not stored in a separate table. Check logs for return history.'
+        });
     } catch (err) {
         console.error('[Returns] GET error:', err.message);
         res.json({ returns: [], total: 0 });
