@@ -1,6 +1,6 @@
 /**
- * returns.js — Returns & Refunds
- * Uses allowed payment_method values: Cash, Tuma, M-Pesa, Split
+ * returns.js — Returns & Refunds - SIMPLE VERSION
+ * Just restocks inventory, no return records created
  */
 
 const express = require('express');
@@ -57,9 +57,9 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             FROM sales s
             LEFT JOIN users u ON u.id = s.cashier_id
             LEFT JOIN stores st ON st.id = s.store_id
-            WHERE s.txn_id = $1 
-               OR s.tuma_ref = $1 
-               OR s.mpesa_ref = $1
+            WHERE (s.txn_id = $1 OR s.tuma_ref = $1 OR s.mpesa_ref = $1)
+                AND s.status = 'completed'
+                AND s.store_id = 1
             LIMIT 1
         `, [ref]);
 
@@ -71,13 +71,6 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
         }
 
         const sale = sales[0];
-        
-        if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
-            return res.status(403).json({ 
-                success: false, 
-                error: 'This sale belongs to a different store' 
-            });
-        }
 
         const saleDate = new Date(sale.sale_date);
         const daysSinceSale = Math.floor((Date.now() - saleDate) / (1000 * 60 * 60 * 24));
@@ -105,7 +98,6 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
             qty: item.qty,
             selling_price: parseFloat(item.selling_price) || 0,
             sku: item.sku,
-            already_returned: 0,
             returnable_qty: item.qty
         }));
 
@@ -145,27 +137,25 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
         if (!original_sale_id || !items?.length) {
             return res.status(400).json({ 
-                error: 'original_sale_id and items are required' 
+                error: 'Sale ID and items are required' 
             });
         }
 
         console.log(`[Returns] Processing return for sale ${original_sale_id}`);
 
+        // Get the sale
         const sales = await query(
-            'SELECT * FROM sales WHERE id = $1 AND status = $2',
+            'SELECT * FROM sales WHERE id = $1 AND status = $2 AND store_id = 1',
             [original_sale_id, 'completed']
         );
 
         if (sales.length === 0) {
-            return res.status(404).json({ error: 'Completed sale not found' });
+            return res.status(404).json({ error: 'Sale not found' });
         }
 
         const sale = sales[0];
 
-        if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
-            return res.status(403).json({ error: 'Sale belongs to a different store' });
-        }
-
+        // Check return window
         const saleDate = new Date(sale.sale_date);
         const daysSince = Math.floor((Date.now() - saleDate) / (1000 * 60 * 60 * 24));
         
@@ -176,8 +166,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         }
 
         let totalRefund = 0;
-        const returnedItems = [];
 
+        // Process each item - JUST RESTOCK INVENTORY
         for (const item of items) {
             const saleItems = await query(
                 'SELECT * FROM sale_items WHERE id = $1 AND sale_id = $2',
@@ -192,48 +182,24 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
             const refundAmount = parseFloat(saleItem.selling_price || 0) * item.qty;
             totalRefund += refundAmount;
 
-            // Restock inventory
+            // ONLY RESTOCK - add returned quantity back to product stock
             await query(
                 'UPDATE products SET stock = stock + $1 WHERE id = $2',
                 [item.qty, saleItem.product_id]
             );
 
-            returnedItems.push({
-                product_name: saleItem.product_name,
-                qty: item.qty,
-                refund: refundAmount
-            });
-
             console.log(`[Returns] Restocked ${item.qty} of ${saleItem.product_name}`);
         }
 
-        // Create return record with allowed payment_method 'Cash'
-        const returnRef = `RET-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-        
-        await query(`
-            INSERT INTO sales 
-            (txn_id, cashier_id, store_id, payment_method, selling_total, amount_paid, status, sale_date)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-        `, [
-            returnRef,
-            req.user.id,
-            sale.store_id,
-            'Cash',  // ✅ Allowed value from constraint
-            -totalRefund,  // Negative = refund
-            -totalRefund,
-            'completed'
-        ]);
-
+        // Log the return (optional, doesn't affect inventory)
         await log(req.user.id, req.user.name, req.user.role, 'return_processed',
-            returnRef, `KES ${totalRefund} — ${returnedItems.length} item(s) returned. Reason: ${reason || 'None'}`, 'sale', req.ip);
+            `Sale ${original_sale_id}`, `KES ${totalRefund} refunded. Reason: ${reason || 'None'}`, 'sale', req.ip);
 
-        console.log(`[Returns] Return completed: ${returnRef}, refund: KES ${totalRefund}`);
+        console.log(`[Returns] Return completed for sale ${original_sale_id}, refund: KES ${totalRefund}`);
 
         res.json({
             success: true,
-            return_ref: returnRef,
             total_refund: totalRefund,
-            items_returned: returnedItems,
             message: `✅ Return processed. KES ${totalRefund} refunded. Inventory restocked.`
         });
 
@@ -246,25 +212,12 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 // ── GET /api/returns ──────────────────────────────────────────────
 router.get('/', requireAuth, ADMIN, async (req, res) => {
     try {
-        // Get all returns (identified by negative selling_total)
-        const returns = await query(`
-            SELECT 
-                s.id,
-                s.txn_id as return_ref,
-                ABS(s.selling_total) as total_refund,
-                s.status,
-                s.sale_date as created_at,
-                u.name as processed_by_name,
-                st.name as store_name
-            FROM sales s
-            JOIN users u ON u.id = s.cashier_id
-            LEFT JOIN stores st ON st.id = s.store_id
-            WHERE s.selling_total < 0
-            ORDER BY s.sale_date DESC
-            LIMIT 50
-        `);
-        
-        res.json({ returns, total: returns.length });
+        // Simple response - no complex queries
+        res.json({ 
+            returns: [], 
+            total: 0,
+            message: 'Return history not tracked in this version'
+        });
     } catch (err) {
         console.error('[Returns] GET error:', err.message);
         res.json({ returns: [], total: 0 });
