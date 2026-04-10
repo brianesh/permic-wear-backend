@@ -81,53 +81,130 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
 // Used by the return UI to load a past sale by receipt ID or TXN
 router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
   try {
-    const ref = req.params.ref.trim().toUpperCase();
-
-    const { rows: [sale] } = await db.query(`
-      SELECT s.*, u.name AS cashier_name, st.name AS store_name
+    const ref = req.params.ref?.trim()?.toUpperCase();
+    
+    if (!ref) {
+      return res.status(400).json({ error: 'Transaction reference is required' });
+    }
+    
+    console.log(`[Returns Lookup] Searching for: ${ref}`);
+    
+    // Check if the sales table has the required columns
+    // Some databases might have 'created_at' vs 'sale_date'
+    let saleQuery = `
+      SELECT 
+        s.*,
+        u.name AS cashier_name,
+        st.name AS store_name
       FROM sales s
       JOIN users u ON u.id = s.cashier_id
       LEFT JOIN stores st ON st.id = s.store_id
-      WHERE (UPPER(s.txn_id) = $1 OR UPPER(s.tuma_ref) = $1)
+      WHERE (UPPER(s.txn_id) = $1 OR UPPER(s.tuma_ref) = $1 OR UPPER(s.mpesa_ref) = $1)
         AND s.status = 'completed'
-    `, [ref]);
-
-    if (!sale) return res.status(404).json({ error: `No completed sale found for "${ref}"` });
-
+    `;
+    
+    const { rows: sales } = await db.query(saleQuery, [ref]);
+    
+    if (sales.length === 0) {
+      return res.status(404).json({ 
+        error: `No completed sale found for "${ref}"`,
+        message: 'Please check the transaction ID and try again'
+      });
+    }
+    
+    const sale = sales[0];
+    
     // Restrict admin to their own store
-    if (req.user.role === 'admin' && sale.store_id !== req.user.store_id)
+    if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
       return res.status(403).json({ error: 'This sale belongs to a different store' });
-
-    // Check return window
-    const { rows: [windowRow] } = await db.query(
-      "SELECT key_value FROM settings WHERE key_name = 'return_window_days'"
-    );
-    const windowDays = parseInt(windowRow?.key_value || 30);
-    const saleDate   = new Date(sale.sale_date);
-    const diffDays   = Math.floor((Date.now() - saleDate.getTime()) / 86400_000);
+    }
+    
+    // Get return window from settings (use 'return_window_days' or default to 30)
+    let windowDays = 30;
+    try {
+      const { rows: [windowRow] } = await db.query(
+        "SELECT key_value FROM settings WHERE key_name = 'return_window_days'"
+      );
+      windowDays = parseInt(windowRow?.key_value || 30);
+    } catch (err) {
+      console.warn('[Returns Lookup] Could not fetch return window, using default 30 days');
+    }
+    
+    // Use created_at or sale_date (handle both column names)
+    const saleDateField = sale.created_at ? 'created_at' : (sale.sale_date ? 'sale_date' : null);
+    if (!saleDateField) {
+      console.error('[Returns Lookup] Sale has no date field:', sale);
+      return res.status(500).json({ error: 'Sale record has no date information' });
+    }
+    
+    const saleDate = new Date(sale[saleDateField]);
+    const diffDays = Math.floor((Date.now() - saleDate.getTime()) / 86400000);
     const withinWindow = diffDays <= windowDays;
-
+    
     // Load sale items with any already-returned quantities
     const { rows: items } = await db.query(`
-      SELECT si.*,
+      SELECT 
+        si.*,
         COALESCE((
           SELECT SUM(ri.qty) FROM return_items ri
           JOIN returns ret ON ret.id = ri.return_id
           WHERE ri.sale_item_id = si.id AND ret.status != 'rejected'
         ), 0) AS already_returned
-      FROM sale_items si WHERE si.sale_id = $1
+      FROM sale_items si 
+      WHERE si.sale_id = $1
     `, [sale.id]);
-
+    
+    // Check if any items have already been fully returned
+    const itemsWithReturnable = items.map(i => ({
+      ...i,
+      returnable_qty: Math.max(0, i.qty - (parseInt(i.already_returned) || 0))
+    }));
+    
+    const hasReturnableItems = itemsWithReturnable.some(i => i.returnable_qty > 0);
+    
     res.json({
-      sale,
-      items: items.map(i => ({ ...i, returnable_qty: i.qty - i.already_returned })),
+      success: true,
+      sale: {
+        id: sale.id,
+        txn_id: sale.txn_id,
+        cashier_id: sale.cashier_id,
+        store_id: sale.store_id,
+        selling_total: sale.selling_total,
+        amount_paid: sale.amount_paid,
+        status: sale.status,
+        created_at: sale[saleDateField],
+        phone: sale.phone,
+        cashier_name: sale.cashier_name,
+        store_name: sale.store_name,
+        tuma_ref: sale.tuma_ref,
+        mpesa_ref: sale.mpesa_ref,
+      },
+      items: itemsWithReturnable,
       return_window_days: windowDays,
       within_window: withinWindow,
       days_since_sale: diffDays,
+      has_returnable_items: hasReturnableItems,
+      message: !withinWindow ? `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.` : null,
     });
+    
   } catch (err) {
-    console.error('[returns] lookup:', err.message);
-    res.status(500).json({ error: 'Lookup failed' });
+    console.error('[returns] lookup error:', err.message);
+    console.error('[returns] lookup stack:', err.stack);
+    
+    // Check for specific database errors
+    if (err.message.includes('column') && err.message.includes('does not exist')) {
+      return res.status(500).json({ 
+        error: 'Database schema mismatch',
+        message: 'Please contact support: missing required column',
+        details: process.env.NODE_ENV === 'development' ? err.message : undefined
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Lookup failed',
+      message: err.message,
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
   }
 });
 
@@ -138,27 +215,45 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
     await conn.beginTransaction();
 
     const { original_sale_id, items, reason, notes } = req.body;
-    if (!original_sale_id || !items?.length)
+    if (!original_sale_id || !items?.length) {
       return res.status(400).json({ error: 'original_sale_id and items are required' });
+    }
 
     // Load sale
     const { rows: [sale] } = await conn.query(
       'SELECT * FROM sales WHERE id = $1 AND status = $2', [original_sale_id, 'completed']
     );
-    if (!sale) return res.status(404).json({ error: 'Completed sale not found' });
+    if (!sale) {
+      return res.status(404).json({ error: 'Completed sale not found' });
+    }
 
     // Store check for admins
-    if (req.user.role === 'admin' && sale.store_id !== req.user.store_id)
+    if (req.user.role === 'admin' && sale.store_id !== req.user.store_id) {
       return res.status(403).json({ error: 'Sale belongs to a different store' });
+    }
 
     // Return window check
-    const { rows: [windowRow] } = await conn.query(
-      "SELECT key_value FROM settings WHERE key_name = 'return_window_days'"
-    );
-    const windowDays = parseInt(windowRow?.key_value || 30);
-    const diffDays   = Math.floor((Date.now() - new Date(sale.sale_date).getTime()) / 86400_000);
-    if (diffDays > windowDays)
-      return res.status(400).json({ error: `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.` });
+    let windowDays = 30;
+    try {
+      const { rows: [windowRow] } = await conn.query(
+        "SELECT key_value FROM settings WHERE key_name = 'return_window_days'"
+      );
+      windowDays = parseInt(windowRow?.key_value || 30);
+    } catch (err) {
+      console.warn('[returns POST] Using default return window');
+    }
+    
+    const saleDateField = sale.created_at ? 'created_at' : (sale.sale_date ? 'sale_date' : null);
+    if (!saleDateField) {
+      throw new Error('Sale has no date field');
+    }
+    
+    const diffDays = Math.floor((Date.now() - new Date(sale[saleDateField]).getTime()) / 86400000);
+    if (diffDays > windowDays) {
+      return res.status(400).json({ 
+        error: `Return window has expired (${windowDays} days). Sale was ${diffDays} days ago.` 
+      });
+    }
 
     // Validate each item
     let totalRefund = 0;
@@ -166,9 +261,12 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
     for (const item of items) {
       const { rows: [si] } = await conn.query(
-        'SELECT * FROM sale_items WHERE id = $1 AND sale_id = $2', [item.sale_item_id, original_sale_id]
+        'SELECT * FROM sale_items WHERE id = $1 AND sale_id = $2', 
+        [item.sale_item_id, original_sale_id]
       );
-      if (!si) throw new Error(`Sale item ${item.sale_item_id} not found on this receipt`);
+      if (!si) {
+        throw new Error(`Sale item ${item.sale_item_id} not found on this receipt`);
+      }
 
       // Check how much has already been returned
       const { rows: [{ already }] } = await conn.query(`
@@ -179,10 +277,11 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       `, [item.sale_item_id]);
 
       const maxReturnable = si.qty - parseInt(already);
-      if (item.qty > maxReturnable)
+      if (item.qty > maxReturnable) {
         throw new Error(`Cannot return ${item.qty} of "${si.product_name}" — only ${maxReturnable} available to return`);
+      }
 
-      totalRefund += parseFloat(si.selling_price) * item.qty;
+      totalRefund += parseFloat(si.unit_price || si.selling_price || 0) * item.qty;
       processedItems.push({
         sale_item_id: si.id,
         product_id:   si.product_id,
@@ -190,22 +289,28 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
         sku:          si.sku,
         size:         si.size,
         qty:          item.qty,
-        refund_price: parseFloat(si.selling_price),
-        restock:      item.restock !== false,  // default true
+        refund_price: parseFloat(si.unit_price || si.selling_price || 0),
+        restock:      item.restock !== false,
         condition:    item.condition || 'good',
       });
     }
 
     // Check approval threshold
-    const { rows: [threshRow] } = await conn.query(
-      "SELECT key_value FROM settings WHERE key_name = 'return_approval_threshold'"
-    );
-    const approvalThreshold = parseFloat(threshRow?.key_value || 5000);
-    const needsApproval     = totalRefund > approvalThreshold && req.user.role !== 'super_admin';
-    const status            = needsApproval ? 'pending_approval' : 'completed';
+    let approvalThreshold = 5000;
+    try {
+      const { rows: [threshRow] } = await conn.query(
+        "SELECT key_value FROM settings WHERE key_name = 'return_approval_threshold'"
+      );
+      approvalThreshold = parseFloat(threshRow?.key_value || 5000);
+    } catch (err) {
+      console.warn('[returns POST] Using default approval threshold');
+    }
+    
+    const needsApproval = totalRefund > approvalThreshold && req.user.role !== 'super_admin';
+    const status = needsApproval ? 'pending_approval' : 'completed';
 
     // Create return record
-    const returnRef = `RET-${uuidv4().replace(/-/g,'').slice(0,8).toUpperCase()}`;
+    const returnRef = `RET-${uuidv4().replace(/-/g, '').slice(0, 8).toUpperCase()}`;
     const { rows: [retRow] } = await conn.query(`
       INSERT INTO returns
         (return_ref, original_sale_id, store_id, processed_by, reason, notes, total_refund, status)
@@ -227,7 +332,8 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       // Restock immediately if approved (or super_admin bypass)
       if (item.restock && item.condition !== 'unsellable' && status === 'completed') {
         await conn.query(
-          'UPDATE products SET stock = stock + $1 WHERE id = $2', [item.qty, item.product_id]
+          'UPDATE products SET stock = stock + $1 WHERE id = $2', 
+          [item.qty, item.product_id]
         );
       }
     }
@@ -238,21 +344,25 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       returnRef, `KES ${totalRefund} — ${processedItems.length} item(s) — ${status}`, 'sale', req.ip);
 
     res.status(201).json({
-      return_ref:    returnRef,
-      return_id:     returnId,
-      total_refund:  totalRefund,
+      success: true,
+      return_ref: returnRef,
+      return_id: returnId,
+      total_refund: totalRefund,
       status,
       needs_approval: needsApproval,
-      message:       needsApproval
+      message: needsApproval
         ? `Return of KES ${totalRefund} is pending manager approval (above KES ${approvalThreshold} threshold)`
         : `Return processed. KES ${totalRefund} to be refunded.`,
     });
   } catch (err) {
     await conn.rollback();
-    console.error('[returns] POST:', err.message);
-    if (err.message.includes('Cannot return') || err.message.includes('window'))
+    console.error('[returns] POST error:', err.message);
+    console.error('[returns] POST stack:', err.stack);
+    
+    if (err.message.includes('Cannot return') || err.message.includes('window')) {
       return res.status(422).json({ error: err.message });
-    res.status(500).json({ error: 'Return processing failed' });
+    }
+    res.status(500).json({ error: 'Return processing failed: ' + err.message });
   } finally {
     conn.release();
   }
@@ -265,9 +375,12 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
     await conn.beginTransaction();
 
     const { rows: [ret] } = await conn.query('SELECT * FROM returns WHERE id = $1', [req.params.id]);
-    if (!ret) return res.status(404).json({ error: 'Return not found' });
-    if (ret.status !== 'pending_approval')
+    if (!ret) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+    if (ret.status !== 'pending_approval') {
       return res.status(400).json({ error: `Return is already ${ret.status}` });
+    }
 
     await conn.query(
       `UPDATE returns SET status='completed', approved_by=$1 WHERE id=$2`,
@@ -290,9 +403,14 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
     await log(req.user.id, req.user.name, req.user.role, 'return_approved',
       ret.return_ref, `Approved by ${req.user.name}`, 'sale', req.ip);
 
-    res.json({ message: 'Return approved and inventory updated', return_ref: ret.return_ref });
+    res.json({ 
+      success: true,
+      message: 'Return approved and inventory updated', 
+      return_ref: ret.return_ref 
+    });
   } catch (err) {
     await conn.rollback();
+    console.error('[returns] approve error:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
     conn.release();
@@ -303,8 +421,12 @@ router.put('/:id/approve', requireAuth, ADMIN, async (req, res) => {
 router.put('/:id/reject', requireAuth, ADMIN, async (req, res) => {
   try {
     const { rows: [ret] } = await db.query('SELECT * FROM returns WHERE id = $1', [req.params.id]);
-    if (!ret) return res.status(404).json({ error: 'Return not found' });
-    if (ret.status === 'completed') return res.status(400).json({ error: 'Cannot reject a completed return' });
+    if (!ret) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+    if (ret.status === 'completed') {
+      return res.status(400).json({ error: 'Cannot reject a completed return' });
+    }
 
     await db.query(
       `UPDATE returns SET status='rejected', approved_by=$1, notes=COALESCE(notes,'')||$2 WHERE id=$3`,
@@ -314,8 +436,12 @@ router.put('/:id/reject', requireAuth, ADMIN, async (req, res) => {
     await log(req.user.id, req.user.name, req.user.role, 'return_rejected',
       ret.return_ref, req.body.reason || 'No reason', 'sale', req.ip);
 
-    res.json({ message: 'Return rejected' });
+    res.json({ 
+      success: true,
+      message: 'Return rejected' 
+    });
   } catch (err) {
+    console.error('[returns] reject error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
