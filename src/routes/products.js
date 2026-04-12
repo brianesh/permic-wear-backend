@@ -32,7 +32,7 @@ function storeFilter(user, paramOffset = 1) {
   }
   
   // Admin and cashiers see products from their store only
-  const storeId = user.store_id;
+  const storeId = user.active_store_id || user.store_id;
   if (!storeId) return { clause: '', vals: [], next: paramOffset };
   
   return {
@@ -138,7 +138,7 @@ router.get('/variants/:id', requireAuth, async (req, res) => {
 
 // ── GET /api/products — full list with filters ─────────────────────────────────
 // Uses proper JOINs with brands and sub_types tables for clean hierarchy
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { brand_id, sub_type_id, top_type, search, in_stock } = req.query;
 
@@ -175,36 +175,11 @@ router.get('/', async (req, res) => {
 
     sql += ' ORDER BY b.name, p.name, p.size';
 
-    console.log('[products] Query:', sql, 'Vals:', vals);
     const { rows } = await db.query(sql, vals);
-    console.log('[products] Found', rows.length, 'products');
     res.json(rows);
   } catch (err) {
     console.error('[products] GET /:', err.message);
     res.status(500).json({ error: 'Failed to fetch products' });
-  }
-});
-
-// ── GET /api/products/debug — debug endpoint to check products table ────────────
-router.get('/debug', requireAuth, async (req, res) => {
-  try {
-    // Check total products count
-    const { rows: [total] } = await db.query('SELECT COUNT(*) as count FROM products');
-    const { rows: [active] } = await db.query('SELECT COUNT(*) as count FROM products WHERE is_active = TRUE');
-    const { rows: [inactive] } = await db.query('SELECT COUNT(*) as count FROM products WHERE is_active = FALSE OR is_active IS NULL');
-    const { rows: sample } = await db.query('SELECT id, name, brand, size, stock, is_active, store_id FROM products ORDER BY id DESC LIMIT 5');
-
-    res.json({
-      total: parseInt(total.count),
-      active: parseInt(active.count),
-      inactive: parseInt(inactive.count),
-      sample: sample,
-      userStoreId: req.user.store_id,
-      userRole: req.user.role,
-    });
-  } catch (err) {
-    console.error('[products] debug:', err.message);
-    res.status(500).json({ error: err.message });
   }
 });
 
@@ -221,9 +196,9 @@ router.get('/search', requireAuth, async (req, res) => {
     let   idx     = 2;
 
     let storeSql = '';
-    if (req.user.store_id) {
+    if (req.user.active_store_id) {
       storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
-      vals.push(req.user.store_id);
+      vals.push(req.user.active_store_id);
       idx++;
     }
 
@@ -280,9 +255,9 @@ router.get('/favorites', requireAuth, async (req, res) => {
     if (top_type) { topTypeSql = ` AND p.top_type = $${idx}`; vals.push(top_type); idx++; }
 
     let storeSql = '';
-    if (req.user.store_id) {
+    if (req.user.active_store_id) {
       storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
-      vals.push(req.user.store_id);
+      vals.push(req.user.active_store_id);
       idx++;
     }
 
@@ -362,7 +337,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       storeId = storeId || null;
     } else {
       // Admin and cashiers must use their own store
-      storeId = req.user.store_id;
+      storeId = req.user.active_store_id;
     }
 
     const { rows } = await db.query(`
@@ -450,7 +425,7 @@ router.post('/bulk-import', requireAuth, ADMIN, async (req, res) => {
     if (req.user.role === 'super_admin') {
       storeId = storeId || null;
     } else {
-      storeId = req.user.store_id;
+      storeId = req.user.active_store_id;
     }
 
     let imported = 0;
@@ -521,7 +496,7 @@ router.post('/bulk-create', requireAuth, ADMIN, async (req, res) => {
     // ── Determine store_id ───────────────────────────────────────
     const getStoreId = (itemStoreId) => {
       if (req.user.role === 'super_admin') return itemStoreId || null;
-      return req.user.store_id;
+      return req.user.active_store_id;
     };
 
     // ── PATH A: Array of pre-expanded variant objects ────────────

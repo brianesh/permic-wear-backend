@@ -1,11 +1,14 @@
 /**
  * stores.js — Multi-store management
  *
- * GET  /api/stores          → list all stores with staff + revenue stats
- * POST /api/stores          → create a new store (super_admin)
- * PUT  /api/stores/:id      → update store (super_admin)
- * DELETE /api/stores/:id    → deactivate store (super_admin)
- * GET  /api/stores/compare  → side-by-side performance comparison (super_admin)
+ * GET  /api/stores                  → list all stores with staff + revenue stats
+ * GET  /api/stores/compare          → side-by-side performance comparison (super_admin)
+ * GET  /api/stores/:id/details      → store details: users, out-of-stock, low-stock
+ * GET  /api/stores/:id/price-list   → download price list CSV for cashiers (super_admin)
+ * POST /api/stores                  → create a new store (super_admin)
+ * PUT  /api/stores/:id              → update store (super_admin)
+ * PUT  /api/stores/:id/activate     → re-activate a deactivated store (super_admin)
+ * DELETE /api/stores/:id            → deactivate store (super_admin)
  */
 
 const express = require('express');
@@ -17,7 +20,7 @@ const router     = express.Router();
 const SUPERADMIN = requireRole('super_admin');
 const ADMIN      = requireRole('super_admin', 'admin');
 
-// GET /api/stores
+// ── GET /api/stores ───────────────────────────────────────────────
 router.get('/', requireAuth, ADMIN, async (req, res) => {
   try {
     const { rows } = await db.query(`
@@ -39,7 +42,8 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
   }
 });
 
-// GET /api/stores/compare — cross-store performance dashboard
+// ── GET /api/stores/compare ───────────────────────────────────────
+// NOTE: must be defined BEFORE /:id routes to avoid param collision
 router.get('/compare', requireAuth, SUPERADMIN, async (req, res) => {
   try {
     const { from, to } = req.query;
@@ -52,19 +56,12 @@ router.get('/compare', requireAuth, SUPERADMIN, async (req, res) => {
         st.name,
         st.location,
         st.is_active,
-        COUNT(DISTINCT sa.id)  FILTER (WHERE sa.status = 'completed')                     AS completed_sales,
-        COALESCE(SUM(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0)          AS total_revenue,
-        COALESCE(SUM(sa.extra_profit)  FILTER (WHERE sa.status = 'completed'), 0)          AS total_profit,
-        COALESCE(AVG(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0)          AS avg_sale,
-        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'cashier')             AS cashier_count,
-        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'admin')               AS admin_count,
-        -- daily breakdown for sparkline
-        json_agg(
-          json_build_object(
-            'date',    DATE(sa.sale_date),
-            'revenue', COALESCE(SUM(sa.selling_total) FILTER (WHERE sa.status='completed'), 0)
-          ) ORDER BY DATE(sa.sale_date)
-        ) FILTER (WHERE sa.id IS NOT NULL)                                                  AS daily_revenue
+        COUNT(DISTINCT sa.id)  FILTER (WHERE sa.status = 'completed')            AS completed_sales,
+        COALESCE(SUM(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0) AS total_revenue,
+        COALESCE(SUM(sa.extra_profit)  FILTER (WHERE sa.status = 'completed'), 0) AS total_profit,
+        COALESCE(AVG(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0) AS avg_sale,
+        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'cashier')    AS cashier_count,
+        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'admin')      AS admin_count
       FROM stores st
       LEFT JOIN sales sa ON sa.store_id = st.id
         AND sa.sale_date >= $1::DATE
@@ -74,14 +71,115 @@ router.get('/compare', requireAuth, SUPERADMIN, async (req, res) => {
       ORDER BY total_revenue DESC
     `, [fromDate, toDate]);
 
-    res.json({ from: fromDate, to: toDate, stores: rows });
+    // Top 5 products per store in the date range
+    const { rows: topRows } = await db.query(`
+      SELECT
+        si.product_name,
+        sa.store_id,
+        SUM(si.qty)                          AS units_sold,
+        SUM(si.qty * si.selling_price)        AS revenue
+      FROM sale_items si
+      JOIN sales sa ON sa.id = si.sale_id
+      WHERE sa.status = 'completed'
+        AND sa.sale_date >= $1::DATE
+        AND sa.sale_date <  ($2::DATE + INTERVAL '1 day')
+      GROUP BY si.product_name, sa.store_id
+      ORDER BY revenue DESC
+    `, [fromDate, toDate]);
+
+    const storesWithTop = rows.map(s => ({
+      ...s,
+      top_products: topRows.filter(r => r.store_id === s.id).slice(0, 5),
+    }));
+
+    res.json({ from: fromDate, to: toDate, stores: storesWithTop });
   } catch (err) {
     console.error('[stores] compare:', err.message);
     res.status(500).json({ error: 'Failed to compare stores' });
   }
 });
 
-// POST /api/stores
+// ── GET /api/stores/:id/details ───────────────────────────────────
+router.get('/:id/details', requireAuth, ADMIN, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Admins can only view their own store
+    if (req.user.role === 'admin' && parseInt(id) !== req.user.active_store_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { rows: [store] } = await db.query('SELECT * FROM stores WHERE id = $1', [id]);
+    if (!store) return res.status(404).json({ error: 'Store not found' });
+
+    const { rows: users } = await db.query(`
+      SELECT id, name, username, role, is_active, created_at
+      FROM users
+      WHERE store_id = $1 AND role != 'super_admin'
+      ORDER BY role, name
+    `, [id]);
+
+    const { rows: outOfStock } = await db.query(`
+      SELECT id, name, sku, size, category, stock, min_price, selling_price
+      FROM products
+      WHERE store_id = $1 AND stock = 0 AND is_active = TRUE
+      ORDER BY name, size
+    `, [id]);
+
+    const { rows: lowStock } = await db.query(`
+      SELECT id, name, sku, size, category, stock, min_price, selling_price
+      FROM products
+      WHERE store_id = $1 AND stock > 0 AND stock <= 5 AND is_active = TRUE
+      ORDER BY stock ASC, name
+    `, [id]);
+
+    res.json({ store, users, out_of_stock: outOfStock, low_stock: lowStock });
+  } catch (err) {
+    console.error('[stores] details:', err.message);
+    res.status(500).json({ error: 'Failed to fetch store details' });
+  }
+});
+
+// ── GET /api/stores/:id/price-list ────────────────────────────────
+// CSV download: SKU, Name, Size, Color, Min Price — for cashier handouts
+router.get('/:id/price-list', requireAuth, SUPERADMIN, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { rows: [store] } = await db.query('SELECT * FROM stores WHERE id = $1', [id]);
+    if (!store) return res.status(404).json({ error: 'Store not found' });
+
+    const { rows: products } = await db.query(`
+      SELECT sku, name, size, color, min_price, selling_price, category, stock
+      FROM products
+      WHERE store_id = $1 AND is_active = TRUE
+      ORDER BY name, size
+    `, [id]);
+
+    const headers = ['SKU', 'Product Name', 'Size', 'Color', 'Min Price (KES)', 'Category'];
+    const lines   = [
+      headers.join(','),
+      ...products.map(p => [
+        p.sku             || '',
+        `"${(p.name       || '').replace(/"/g, '""')}"`,
+        p.size            || '',
+        `"${(p.color      || '').replace(/"/g, '""')}"`,
+        p.min_price       || 0,
+        `"${(p.category   || '').replace(/"/g, '""')}"`,
+      ].join(',')),
+    ];
+
+    const filename = `price-list-${store.name.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-${new Date().toISOString().split('T')[0]}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(lines.join('\n'));
+  } catch (err) {
+    console.error('[stores] price-list:', err.message);
+    res.status(500).json({ error: 'Failed to generate price list' });
+  }
+});
+
+// ── POST /api/stores ──────────────────────────────────────────────
 router.post('/', requireAuth, SUPERADMIN, async (req, res) => {
   try {
     const { name, location, phone } = req.body;
@@ -101,7 +199,7 @@ router.post('/', requireAuth, SUPERADMIN, async (req, res) => {
   }
 });
 
-// PUT /api/stores/:id
+// ── PUT /api/stores/:id ───────────────────────────────────────────
 router.put('/:id', requireAuth, SUPERADMIN, async (req, res) => {
   try {
     const { id } = req.params;
@@ -126,7 +224,25 @@ router.put('/:id', requireAuth, SUPERADMIN, async (req, res) => {
   }
 });
 
-// DELETE /api/stores/:id — soft deactivate
+// ── PUT /api/stores/:id/activate ─────────────────────────────────
+router.put('/:id/activate', requireAuth, SUPERADMIN, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows: [s] } = await db.query('SELECT * FROM stores WHERE id = $1', [id]);
+    if (!s) return res.status(404).json({ error: 'Store not found' });
+
+    await db.query('UPDATE stores SET is_active=TRUE, updated_at=NOW() WHERE id=$1', [id]);
+    await log(req.user.id, req.user.name, req.user.role, 'store_activated',
+      s.name, `id=${id}`, 'settings', req.ip);
+
+    res.json({ message: 'Store activated' });
+  } catch (err) {
+    console.error('[stores] activate:', err.message);
+    res.status(500).json({ error: 'Failed to activate store' });
+  }
+});
+
+// ── DELETE /api/stores/:id — soft deactivate ──────────────────────
 router.delete('/:id', requireAuth, SUPERADMIN, async (req, res) => {
   try {
     const { id } = req.params;

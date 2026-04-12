@@ -45,7 +45,7 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
         WHERE u.store_id = $1 OR u.role = 'super_admin'
         ORDER BY u.created_at ASC
       `;
-      vals = [req.user.store_id];
+      vals = [req.user.active_store_id];
     }
 
     const { rows } = await db.query(sql, vals);
@@ -69,7 +69,7 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
     // Admins can only create users for their own store
     let assignedStoreId = store_id || null;
     if (req.user.role === 'admin') {
-      assignedStoreId = req.user.store_id;
+      assignedStoreId = req.user.active_store_id;
     }
     // super_admin must assign a store to non-super users
     if (role !== 'super_admin' && !assignedStoreId) {
@@ -110,7 +110,7 @@ router.put('/:id', requireAuth, ADMIN, async (req, res) => {
       return res.status(403).json({ error: 'Cannot edit Super Admin account' });
 
     // Admins can only edit users in their own store
-    if (req.user.role === 'admin' && target.store_id !== req.user.store_id)
+    if (req.user.role === 'admin' && target.store_id !== req.user.active_store_id)
       return res.status(403).json({ error: 'Cannot edit users from another store' });
 
     const fields = [];
@@ -157,7 +157,7 @@ router.delete('/:id', requireAuth, ADMIN, async (req, res) => {
     if (req.user.role === 'admin') {
       if (target.role !== 'cashier')
         return res.status(403).json({ error: 'Admins can only delete cashier accounts' });
-      if (target.store_id !== req.user.store_id)
+      if (target.store_id !== req.user.active_store_id)
         return res.status(403).json({ error: 'Cannot delete users from another store' });
     }
 
