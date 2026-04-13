@@ -28,8 +28,8 @@ const TOP_SIZES = {
 };
 
 const TROUSER_SIZES = {
-  standard: Array.from({ length: 17 }, (_, i) => (28 + i).toString()), // 28-44
-  extended: Array.from({ length: 25 }, (_, i) => (26 + i).toString()), // 26-50
+  standard: Array.from({ length: 29 }, (_, i) => (24 + i).toString()), // 24-52
+  extended: Array.from({ length: 29 }, (_, i) => (24 + i).toString()), // 24-52
 };
 
 // Map product types to size categories (all keys should be lowercase for matching)

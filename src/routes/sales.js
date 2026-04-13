@@ -13,12 +13,15 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { items, payment_method, amount_paid = 0, phone, tuma_portion, mpesa_portion } = req.body;
+    const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
+    // Accept both 'phone' and 'mpesa_phone' from frontend
+    const phone = req.body.phone || req.body.mpesa_phone || null;
+    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'M-Pesa' → 'Tuma'
+    const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
-    // Accept both 'Tuma' and 'M-Pesa' for backward compatibility
-    if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(payment_method))
+    if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(req.body.payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
 
     // Get cashier's commission rate
@@ -63,19 +66,21 @@ router.post('/', requireAuth, async (req, res) => {
     const tumaPortionNum = parseFloat(tuma_portion || mpesa_portion) || 0;
 
     let saleStatus;
-    // Use pending_mpesa for M-Pesa/Tuma payments to match DB schema
-    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_mpesa';
+    // Use pending_tuma for M-Pesa/Tuma payments to match DB CHECK constraint
+    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
     else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
     else saleStatus = 'completed';
 
     const { rows: [saleRow] } = await client.query(
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
-          change_given, extra_profit, commission, commission_rate, phone, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+          change_given, extra_profit, commission, commission_rate,
+          mpesa_phone, phone, store_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,
-        phone || null, saleStatus]
+        phone || null, phone || null,
+        req.user.store_id || null, saleStatus]
     );
     const saleId = saleRow.id;
 
@@ -155,7 +160,7 @@ router.get('/', requireAuth, async (req, res) => {
     const { from, to, cashier_id, method, status, page = 1, limit = 20 } = req.query;
 
     // Default to only completed sales unless status filter is explicitly provided
-    let where    = "status = 'completed'";
+    let where    = "s.status = 'completed'";
     const vals   = [];
     let   idx    = 1;
     const push   = v => { vals.push(v); return `$${idx++}`; };
@@ -178,7 +183,11 @@ router.get('/', requireAuth, async (req, res) => {
     if (to)     where += ` AND DATE(s.sale_date) <= ${push(to)}`;
     if (method) where += ` AND s.payment_method = ${push(method)}`;
     // Allow filtering by specific status (completed, pending_mpesa, failed, etc.)
-    if (status && status !== 'All') where += ` AND s.status = ${push(status)}`;
+    // When status filter is provided, override the default completed filter
+    if (status && status !== 'All') {
+      where = where.replace("s.status = 'completed'", '1=1');
+      where += ` AND s.status = ${push(status)}`;
+    }
 
     const { rows: [{ total }] } = await db.query(
       `SELECT COUNT(*) AS total FROM sales s WHERE ${where}`, vals
