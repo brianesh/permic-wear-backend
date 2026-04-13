@@ -1,40 +1,59 @@
 /**
- * db/connection.js — PostgreSQL (Supabase) with dual-style query results
+ * db/connection.js — PostgreSQL with dual-style query results
  *
  * Supports BOTH access patterns used across routes:
  *   Pattern A (mysql2 style):  const [[row]] = await db.query(sql, params)
  *   Pattern B (pg style):      const { rows } = await db.query(sql, params)
  *   Pattern C (pg style):      const { rows: [row] } = await db.query(sql, params)
  *
- * Returns an array [rows, fields] that ALSO has a .rows property,
- * so both destructuring styles work on the same return value.
+ * EGRESS OPTIMIZATION:
+ *   - Uses SUPABASE_POOLER_URL (port 6543, pgBouncer) when available.
+ *     This routes through Supabase's connection pooler which dramatically
+ *     reduces egress vs direct connections (port 5432).
+ *   - Falls back to DATABASE_URL if pooler URL not set.
+ *   - Set search_path once per connection, not per query.
  */
 
 const { Pool } = require('pg');
 
+// ── Choose connection string ──────────────────────────────────────────────────
+// SUPABASE_POOLER_URL = your Supabase pooler URL (port 6543, Transaction mode)
+// Found in: Supabase Dashboard → Settings → Database → Connection Pooling
+// Example: postgres://postgres.xxxx:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
+const connectionString = process.env.SUPABASE_POOLER_URL || process.env.DATABASE_URL;
+
+if (process.env.SUPABASE_POOLER_URL) {
+  console.log('🔀 Using Supabase pgBouncer pooler (egress-optimized)');
+} else {
+  console.log('⚠️  SUPABASE_POOLER_URL not set — using direct connection. Set it to reduce egress.');
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString,
   ssl: { rejectUnauthorized: false },
-  max: 10,
-  idleTimeoutMillis: 30000,
+  max: 10,                    // max simultaneous connections
+  min: 1,                     // keep 1 alive to avoid cold reconnects
+  idleTimeoutMillis: 30000,   // release idle connections after 30s
   connectionTimeoutMillis: 10000,
+  // pgBouncer in transaction mode doesn't support prepared statements
+  ...(process.env.SUPABASE_POOLER_URL ? { statement_timeout: 30000 } : {}),
 });
 
-// Convert MySQL ? placeholders → PostgreSQL $1 $2 $3
+// ── Placeholder converter: MySQL ? → PostgreSQL $1 $2 ────────────────────────
 function convertPlaceholders(sql) {
   let i = 0;
   return sql.replace(/\?/g, () => `$${++i}`);
 }
 
-// Wrap a pg query function to return dual-style result
+// ── Dual-style result wrapper ─────────────────────────────────────────────────
+// Returns array [rows, fields] that ALSO has .rows property
+// so both [[row]] and { rows } destructuring work on the same value
 function wrapQuery(queryFn) {
   return async function(sql, params = []) {
     const pgSql = convertPlaceholders(sql);
     const result = await queryFn(pgSql, params);
     const rows = result.rows || [];
 
-    // Build array [rows, fields] with .rows and .insertId attached
-    // This satisfies BOTH [[row]] destructuring AND { rows } destructuring
     const ret = [rows, result.fields || []];
     ret.rows     = rows;
     ret.insertId = rows[0]?.id ?? null;
@@ -44,17 +63,18 @@ function wrapQuery(queryFn) {
 
 pool.query = wrapQuery(pool.query.bind(pool));
 
-// FIX: Force search_path to public on every new connection.
-// Without this, Supabase's 'authenticator' role (used by the app) has no
-// search_path set, so it cannot resolve tables in the public schema.
+// ── Set search_path once per new connection ───────────────────────────────────
+// Supabase's authenticator role has no default search_path — this fixes
+// "relation does not exist" errors without paying egress for SET on every query
 pool.on('connect', client => {
-  client.query("SET search_path TO public, extensions");
+  client.query("SET search_path TO public, extensions").catch(err => {
+    console.warn('⚠️  search_path set failed:', err.message);
+  });
 });
 
-// MySQL-like getConnection for transactions
+// ── MySQL-compatible getConnection for transactions ───────────────────────────
 pool.getConnection = async () => {
   const client = await pool.connect();
-  // Also set search_path on transaction clients
   await client.query("SET search_path TO public, extensions");
   client.query            = wrapQuery(client.query.bind(client));
   client.beginTransaction = () => client.query('BEGIN');
@@ -64,9 +84,15 @@ pool.getConnection = async () => {
   return client;
 };
 
-// Test on startup
+// ── Startup connection test ───────────────────────────────────────────────────
 pool.connect()
-  .then(c => { console.log('✅ PostgreSQL (Supabase) connected'); c.release(); })
-  .catch(err => { console.error('❌ PostgreSQL connection failed:', err.message); process.exit(1); });
+  .then(c => {
+    console.log('✅ PostgreSQL connected successfully');
+    c.release();
+  })
+  .catch(err => {
+    console.error('❌ PostgreSQL connection failed:', err.message);
+    process.exit(1);
+  });
 
 module.exports = pool;
