@@ -22,8 +22,8 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
     let sql;
     let vals = [];
 
-    if (req.user.role === 'super_admin') {
-      // Super admin sees everyone with store name
+    if (req.user.role === 'super_admin' && !req.user.active_store_id) {
+      // Super admin in global mode — sees everyone
       sql = `
         SELECT u.id, u.name, u.email, u.role, u.avatar, u.status,
                u.commission_rate, u.last_login, u.created_at, u.store_id,
@@ -33,6 +33,19 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
         LEFT JOIN stores st ON st.id = u.store_id
         ORDER BY st.name NULLS LAST, u.created_at ASC
       `;
+    } else if (req.user.role === 'super_admin' && req.user.active_store_id) {
+      // Super admin operating in a specific store — show that store's users
+      sql = `
+        SELECT u.id, u.name, u.email, u.role, u.avatar, u.status,
+               u.commission_rate, u.last_login, u.created_at, u.store_id,
+               st.name AS store_name,
+               (SELECT COUNT(*) FROM sales WHERE cashier_id = u.id AND store_id = $1) AS total_sales
+        FROM users u
+        LEFT JOIN stores st ON st.id = u.store_id
+        WHERE u.store_id = $1 OR u.role = 'super_admin'
+        ORDER BY u.created_at ASC
+      `;
+      vals = [req.user.active_store_id];
     } else {
       // Admin sees only their store
       sql = `

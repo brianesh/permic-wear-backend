@@ -24,11 +24,10 @@ function buildFilters(user, from, to, saleAlias = 's', startIdx = 1) {
   const clauses = [];
   const vals    = [];
   let   idx     = startIdx;
-  // prefix: 's.' or '' (no alias) - never '.column'
   const p = saleAlias ? saleAlias + '.' : '';
 
-  // Store scoping
-  if (user.role === 'admin') {
+  // Store scoping: admin always scoped; super_admin scoped only when they have an active store picked
+  if (user.active_store_id && (user.role === 'admin' || user.role === 'super_admin')) {
     clauses.push(`${p}store_id = $${idx++}`);
     vals.push(user.active_store_id);
   }
@@ -60,14 +59,10 @@ router.get('/summary', requireAuth, ADMIN, async (req, res) => {
       WHERE s.status = 'completed' ${where}
     `, vals);
 
-    // Today / yesterday — store-scoped too
-    const storeClause = req.user.role === 'admin'
-      ? `AND store_id = ${vals[0] || 'NULL'}`
-      : '';
-    // Use parameterised for safety
+    // Today / yesterday — store-scoped for admin and super_admin with active store
     let todayVals = [], yestVals = [];
     let todayStore = '', yestStore = '';
-    if (req.user.role === 'admin') {
+    if (req.user.active_store_id && (req.user.role === 'admin' || req.user.role === 'super_admin')) {
       todayStore = 'AND store_id = $1';
       todayVals  = [req.user.active_store_id];
       yestStore  = 'AND store_id = $1';
@@ -89,7 +84,7 @@ router.get('/summary', requireAuth, ADMIN, async (req, res) => {
 
     // Low stock — scoped to store
     let lsVals = [], lsClause = '';
-    if (req.user.role === 'admin') {
+    if (req.user.active_store_id && (req.user.role === 'admin' || req.user.role === 'super_admin')) {
       lsClause = 'AND store_id = $1';
       lsVals   = [req.user.active_store_id];
     }
@@ -201,8 +196,8 @@ router.get('/cashiers', requireAuth, async (req, res) => {
     const joinConds = [`s.cashier_id = u.id`, `s.status = 'completed'`];
     if (from) { joinConds.push(`DATE(s.sale_date) >= $${idx++}`); vals.push(from); }
     if (to)   { joinConds.push(`DATE(s.sale_date) <= $${idx++}`); vals.push(to);   }
-    // Store scope on sales JOIN
-    if (isAdmin) {
+    // Store scope on sales JOIN — admin always; super_admin only if they picked a store
+    if (active_store_id && (isAdmin || isSuperAdmin)) {
       joinConds.push(`s.store_id = $${idx++}`);
       vals.push(active_store_id);
     }
@@ -211,8 +206,8 @@ router.get('/cashiers', requireAuth, async (req, res) => {
     const userConds = [`u.status = 'active'`];
     if (isAdmin)   userConds.push(`u.role IN ('admin','cashier')`);
     if (isCashier) { userConds.push(`u.id = $${idx++}`); vals.push(userId); }
-    // Admin scope: only show users in their store
-    if (isAdmin) {
+    // Scope to store for admin; super_admin scoped only if they picked a store
+    if (active_store_id && (isAdmin || isSuperAdmin)) {
       userConds.push(`u.store_id = $${idx++}`);
       vals.push(active_store_id);
     }

@@ -24,7 +24,7 @@ router.get('/jobs', requireAuth, ADMIN, async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
     const storeFilter = req.user.role !== 'super_admin'
-      ? `AND pj.store_id = ${req.user.store_id}` : '';
+      ? `AND pj.store_id = ${req.user.active_store_id}` : '';
 
     const { rows: [{ total }] } = await db.query(
       `SELECT COUNT(*) AS total FROM print_jobs pj WHERE 1=1 ${storeFilter}`
@@ -57,7 +57,7 @@ router.post('/jobs', requireAuth, ADMIN, async (req, res) => {
     // items: [{ product_id, copies }]
     if (!items?.length) return res.status(400).json({ error: 'items required' });
 
-    const storeId     = req.user.store_id;
+    const storeId     = req.user.active_store_id;
     const totalLabels = items.reduce((s, i) => s + (i.copies || 1), 0);
 
     const { rows: [job] } = await conn.query(`
@@ -175,7 +175,7 @@ router.delete('/jobs/:id', requireAuth, ADMIN, async (req, res) => {
 router.get('/analytics', requireAuth, ADMIN, async (req, res) => {
   try {
     const storeFilter = req.user.role !== 'super_admin'
-      ? `AND (p.store_id = ${req.user.store_id} OR p.store_id IS NULL)` : '';
+      ? `AND p.store_id = ${req.user.active_store_id}` : '';
 
     // Fast-moving: sold >5 units in last 30 days
     const { rows: fastMoving } = await db.query(`

@@ -6,41 +6,57 @@ const router = express.Router();
 const ADMIN  = requireRole('super_admin', 'admin');
 
 // GET /api/logs
+// activity_logs has no store_id column, so we scope by looking at which
+// users belong to this store. Admin sees logs from their store's users only.
+// super_admin sees all logs.
 router.get('/', requireAuth, ADMIN, async (req, res) => {
   try {
     const { category, role, search, from, to, page = 1, limit = 50 } = req.query;
 
-    let sql    = 'SELECT * FROM activity_logs WHERE 1=1';
     const vals = [];
+    let   idx  = 1;
+    const push = v => { vals.push(v); return `$${idx++}`; };
 
-    if (category && category !== 'All') { sql += ' AND category = ?';        vals.push(category); }
-    if (role     && role     !== 'All') { sql += ' AND user_role = ?';        vals.push(role); }
-    if (from)                           { sql += ' AND DATE(logged_at) >= ?'; vals.push(from); }
-    if (to)                             { sql += ' AND DATE(logged_at) <= ?'; vals.push(to); }
-    if (search) {
-      sql += ' AND (user_name LIKE ? OR action LIKE ? OR target LIKE ? OR detail LIKE ?)';
-      const q = `%${search}%`;
-      vals.push(q, q, q, q);
+    let where = '1=1';
+
+    // Store scoping for admin: only show logs from users in their store
+    if (req.user.role === 'admin' && req.user.active_store_id) {
+      where += ` AND al.user_id IN (
+        SELECT id FROM users WHERE store_id = ${push(req.user.active_store_id)}
+        UNION SELECT ${push(req.user.id)}
+      )`;
     }
 
-    // Total count
-    const [countRows] = await db.query(
-      sql.replace('SELECT *', 'SELECT COUNT(*) AS total'), vals
+    if (category && category !== 'All') { where += ` AND al.category = ${push(category)}`; }
+    if (role     && role     !== 'All') { where += ` AND al.user_role = ${push(role)}`; }
+    if (from)                           { where += ` AND DATE(al.logged_at) >= ${push(from)}`; }
+    if (to)                             { where += ` AND DATE(al.logged_at) <= ${push(to)}`; }
+    if (search) {
+      const q = `%${search}%`;
+      where += ` AND (al.user_name ILIKE ${push(q)} OR al.action ILIKE ${push(q)} OR al.target ILIKE ${push(q)} OR al.detail ILIKE ${push(q)})`;
+    }
+
+    const { rows: [{ total }] } = await db.query(
+      `SELECT COUNT(*) AS total FROM activity_logs al WHERE ${where}`, vals
     );
-    const total = countRows[0].total;
 
-    sql += ' ORDER BY logged_at DESC LIMIT ? OFFSET ?';
-    vals.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const { rows: logs } = await db.query(
+      `SELECT al.* FROM activity_logs al
+       WHERE ${where}
+       ORDER BY al.logged_at DESC
+       LIMIT ${push(parseInt(limit))} OFFSET ${push(offset)}`,
+      vals
+    );
 
-    const [rows] = await db.query(sql, vals);
-    res.json({ logs: rows, total, page: parseInt(page) });
+    res.json({ logs, total: parseInt(total), page: parseInt(page) });
   } catch (err) {
-    console.error(err);
+    console.error('[logs] GET:', err.message);
     res.status(500).json({ error: 'Failed to fetch logs' });
   }
 });
 
-// DELETE /api/logs  — Super Admin only
+// DELETE /api/logs — Super Admin only
 router.delete('/', requireAuth, requireRole('super_admin'), async (req, res) => {
   try {
     await db.query('DELETE FROM activity_logs');

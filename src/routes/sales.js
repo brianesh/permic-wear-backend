@@ -163,10 +163,10 @@ router.get('/', requireAuth, async (req, res) => {
     // Store scoping
     if (isCashier) {
       where += ` AND s.cashier_id = ${push(req.user.id)}`;
-    } else if (isAdmin) {
+    } else if (isAdmin && req.user.active_store_id) {
       where += ` AND s.store_id = ${push(req.user.active_store_id)}`;
     }
-    // super_admin sees all (no extra filter)
+    // super_admin sees all stores (no extra filter)
 
     if (!isCashier && cashier_id) where += ` AND s.cashier_id = ${push(cashier_id)}`;
     if (from)   where += ` AND DATE(s.sale_date) >= ${push(from)}`;

@@ -21,22 +21,17 @@ const ADMIN  = requireRole('super_admin', 'admin');
 // super_admin can see ALL products across all stores
 // admin and cashiers only see products from their store
 function storeFilter(user, paramOffset = 1) {
-  // If no user (unauthenticated), return no filter (show all products)
-  if (!user) {
-    return { clause: '', vals: [], next: paramOffset };
-  }
-  
-  // Super admin sees all products (no store filter)
-  if (user.role === 'super_admin') {
-    return { clause: '', vals: [], next: paramOffset };
-  }
-  
-  // Admin and cashiers see products from their store only
-  const storeId = user.active_store_id || user.store_id;
+  if (!user) return { clause: '', vals: [], next: paramOffset };
+  // Use active_store_id for ALL roles.
+  // super_admin with no active store (global mode) → sees all stores.
+  // super_admin with active store picked → sees only that store (+ unassigned).
+  // admin/cashier → always scoped to their store (+ unassigned for backwards compat).
+  const storeId = user.active_store_id;
   if (!storeId) return { clause: '', vals: [], next: paramOffset };
-  
+  // Include products with NULL store_id for backwards compatibility
+  // (products added before multi-store was implemented)
   return {
-    clause: ` AND p.store_id = $${paramOffset}`,
+    clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
     vals: [storeId],
     next: paramOffset + 1,
   };
@@ -256,7 +251,7 @@ router.get('/favorites', requireAuth, async (req, res) => {
 
     let storeSql = '';
     if (req.user.active_store_id) {
-      storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
+      storeSql = ` AND p.store_id = $${idx}`;
       vals.push(req.user.active_store_id);
       idx++;
     }

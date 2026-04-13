@@ -56,12 +56,12 @@ router.get('/compare', requireAuth, SUPERADMIN, async (req, res) => {
         st.name,
         st.location,
         st.is_active,
-        COUNT(DISTINCT sa.id)  FILTER (WHERE sa.status = 'completed')            AS completed_sales,
-        COALESCE(SUM(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0) AS total_revenue,
-        COALESCE(SUM(sa.extra_profit)  FILTER (WHERE sa.status = 'completed'), 0) AS total_profit,
-        COALESCE(AVG(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0) AS avg_sale,
-        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'cashier')    AS cashier_count,
-        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'admin')      AS admin_count
+        COUNT(DISTINCT sa.id)  FILTER (WHERE sa.status = 'completed')                        AS completed_sales,
+        COALESCE(SUM(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0)::NUMERIC   AS total_revenue,
+        COALESCE(SUM(sa.extra_profit)  FILTER (WHERE sa.status = 'completed'), 0)::NUMERIC   AS total_profit,
+        COALESCE(AVG(sa.selling_total) FILTER (WHERE sa.status = 'completed'), 0)::NUMERIC   AS avg_sale,
+        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'cashier')               AS cashier_count,
+        COUNT(DISTINCT u.id) FILTER (WHERE u.is_active AND u.role = 'admin')                 AS admin_count
       FROM stores st
       LEFT JOIN sales sa ON sa.store_id = st.id
         AND sa.sale_date >= $1::DATE
@@ -113,21 +113,21 @@ router.get('/:id/details', requireAuth, ADMIN, async (req, res) => {
     if (!store) return res.status(404).json({ error: 'Store not found' });
 
     const { rows: users } = await db.query(`
-      SELECT id, name, username, role, is_active, created_at
+      SELECT id, name, email, role, is_active, created_at
       FROM users
       WHERE store_id = $1 AND role != 'super_admin'
       ORDER BY role, name
     `, [id]);
 
     const { rows: outOfStock } = await db.query(`
-      SELECT id, name, sku, size, category, stock, min_price, selling_price
+      SELECT id, name, sku, size, category, stock, min_price
       FROM products
       WHERE store_id = $1 AND stock = 0 AND is_active = TRUE
       ORDER BY name, size
     `, [id]);
 
     const { rows: lowStock } = await db.query(`
-      SELECT id, name, sku, size, category, stock, min_price, selling_price
+      SELECT id, name, sku, size, category, stock, min_price
       FROM products
       WHERE store_id = $1 AND stock > 0 AND stock <= 5 AND is_active = TRUE
       ORDER BY stock ASC, name
@@ -150,13 +150,13 @@ router.get('/:id/price-list', requireAuth, SUPERADMIN, async (req, res) => {
     if (!store) return res.status(404).json({ error: 'Store not found' });
 
     const { rows: products } = await db.query(`
-      SELECT sku, name, size, color, min_price, selling_price, category, stock
+      SELECT sku, name, size, color, min_price, category, stock
       FROM products
       WHERE store_id = $1 AND is_active = TRUE
       ORDER BY name, size
     `, [id]);
 
-    const headers = ['SKU', 'Product Name', 'Size', 'Color', 'Min Price (KES)', 'Category'];
+    const headers = ['SKU', 'Product Name', 'Size', 'Color', 'Min Price (KES)', 'Category', 'Stock'];
     const lines   = [
       headers.join(','),
       ...products.map(p => [
@@ -166,6 +166,7 @@ router.get('/:id/price-list', requireAuth, SUPERADMIN, async (req, res) => {
         `"${(p.color      || '').replace(/"/g, '""')}"`,
         p.min_price       || 0,
         `"${(p.category   || '').replace(/"/g, '""')}"`,
+        p.stock           || 0,
       ].join(',')),
     ];
 
@@ -176,6 +177,32 @@ router.get('/:id/price-list', requireAuth, SUPERADMIN, async (req, res) => {
   } catch (err) {
     console.error('[stores] price-list:', err.message);
     res.status(500).json({ error: 'Failed to generate price list' });
+  }
+});
+
+// ── POST /api/stores/assign-orphans ──────────────────────────────
+// Super admin can reassign NULL-store products/sales to a specific store
+router.post('/assign-orphans', requireAuth, SUPERADMIN, async (req, res) => {
+  try {
+    const { store_id } = req.body;
+    if (!store_id) return res.status(400).json({ error: 'store_id required' });
+
+    const { rows: [store] } = await db.query('SELECT id FROM stores WHERE id = $1', [store_id]);
+    if (!store) return res.status(404).json({ error: 'Store not found' });
+
+    const { rowCount: prodCount } = await db.query(
+      'UPDATE products SET store_id = $1 WHERE store_id IS NULL', [store_id]
+    );
+    const { rowCount: salesCount } = await db.query(
+      'UPDATE sales SET store_id = $1 WHERE store_id IS NULL', [store_id]
+    );
+    await log(req.user.id, req.user.name, req.user.role, 'store_orphans_assigned',
+      `Store #${store_id}`, `${prodCount} products, ${salesCount} sales assigned`, 'settings', req.ip);
+
+    res.json({ message: 'Orphan records assigned', products: prodCount, sales: salesCount });
+  } catch (err) {
+    console.error('[stores] assign-orphans:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
