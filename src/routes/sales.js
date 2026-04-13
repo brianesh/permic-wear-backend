@@ -14,14 +14,8 @@ router.post('/', requireAuth, async (req, res) => {
     await client.query('BEGIN');
 
     const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
-<<<<<<< HEAD
     const phone = req.body.phone || req.body.mpesa_phone || null;
     // DB CHECK only allows 'Cash','Tuma','M-Pesa','Split'
-=======
-    // Accept both 'phone' and 'mpesa_phone' from frontend
-    const phone = req.body.phone || req.body.mpesa_phone || null;
-    // Normalize: DB CHECK only allows 'Cash','Tuma','Split' — map 'M-Pesa' → 'Tuma'
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
     const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
 
     if (!items || !items.length)
@@ -69,14 +63,8 @@ router.post('/', requireAuth, async (req, res) => {
     const tumaPortionNum = parseFloat(tuma_portion || mpesa_portion) || 0;
 
     let saleStatus;
-<<<<<<< HEAD
     if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
     else if (payment_method === 'Split' && tumaPortionNum > 0)    saleStatus = 'pending_split';
-=======
-    // Use pending_tuma for M-Pesa/Tuma payments to match DB CHECK constraint
-    if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
-    else if (payment_method === 'Split' && tumaPortionNum > 0) saleStatus = 'pending_split';
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
     else saleStatus = 'completed';
 
     // FIX: use active_store_id (works for super_admin store picker too)
@@ -90,12 +78,7 @@ router.post('/', requireAuth, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,
-<<<<<<< HEAD
         phone || null, phone || null, storeId, saleStatus]
-=======
-        phone || null, phone || null,
-        req.user.store_id || null, saleStatus]
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
     );
     const saleId = saleRow.id;
 
@@ -172,18 +155,10 @@ router.get('/', requireAuth, async (req, res) => {
 
     const { from, to, cashier_id, method, status, page = 1, limit = 20 } = req.query;
 
-<<<<<<< HEAD
     let where  = "s.status = 'completed'";
     const vals = [];
     let   idx  = 1;
     const push = v => { vals.push(v); return `$${idx++}`; };
-=======
-    // Default to only completed sales unless status filter is explicitly provided
-    let where    = "s.status = 'completed'";
-    const vals   = [];
-    let   idx    = 1;
-    const push   = v => { vals.push(v); return `$${idx++}`; };
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
 
     // Store scoping
     if (isCashier) {
@@ -197,11 +172,6 @@ router.get('/', requireAuth, async (req, res) => {
     if (from)   where += ` AND DATE(s.sale_date) >= ${push(from)}`;
     if (to)     where += ` AND DATE(s.sale_date) <= ${push(to)}`;
     if (method) where += ` AND s.payment_method = ${push(method)}`;
-<<<<<<< HEAD
-=======
-    // Allow filtering by specific status (completed, pending_mpesa, failed, etc.)
-    // When status filter is provided, override the default completed filter
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
     if (status && status !== 'All') {
       where = where.replace("s.status = 'completed'", '1=1');
       where += ` AND s.status = ${push(status)}`;

@@ -156,10 +156,7 @@ router.post('/stk-push', requireAuth, async (req, res) => {
       'SELECT id, txn_id, status FROM sales WHERE id = $1', [sale_id]
     );
     if (!sale) return res.status(404).json({ error: 'Sale not found' });
-<<<<<<< HEAD
     
-=======
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
     // Accept pending_tuma, pending_mpesa (legacy), and pending_split statuses
     if (!['pending_mpesa', 'pending_tuma', 'pending_split'].includes(sale.status))
       return res.status(400).json({ error: `Sale is already ${sale.status}` });
@@ -389,16 +386,12 @@ const handleTumaCallback = async (req, res) => {
          WHERE id = $3`,
         [resultCode, resultDesc || failReason, txn.id]
       );
-<<<<<<< HEAD
       
       // Update sale status only if not already completed
       await db.query(
         "UPDATE sales SET status = 'failed' WHERE id = $1 AND status NOT IN ('completed')", 
         [txn.sale_id]
       );
-=======
-      await db.query("UPDATE sales SET status='failed' WHERE id=$1 AND status NOT IN ('completed')", [txn.sale_id]);
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
 
       // Handle cancellation policy (result_code 1032 = user cancelled)
       if (resultCode === 1032 || resultCode === '1032') {
@@ -455,25 +448,8 @@ router.get('/status/:id', requireAuth, async (req, res) => {
          WHERE tt.checkout_request_id = $1`,
         [id]
       );
-<<<<<<< HEAD
       txn = byCheckout;
       if (txn) console.log(`[Tuma Status] ✅ Found by checkout_request_id`);
-=======
-      txn = rows2[0] || null;
-    }
-
-    // If still not found, try by sale_id + most recent pending
-    if (!txn) {
-      const { rows: rows3 } = await db.query(
-        `SELECT tt.*, s.txn_id, s.selling_total, s.status AS sale_status
-         FROM tuma_transactions tt JOIN sales s ON tt.sale_id=s.id
-         WHERE tt.payment_ref LIKE 'TUMA-%'
-           AND tt.status='pending'
-           AND tt.initiated_at > NOW() - INTERVAL '10 minutes'
-         ORDER BY tt.initiated_at DESC LIMIT 1`
-      );
-      txn = rows3[0] || null;
->>>>>>> 5b21e752c3bc90b8509c9d360217cfc9f6277192
     }
     
     // Strategy 3: Search by merchant_request_id
