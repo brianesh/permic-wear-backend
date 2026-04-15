@@ -19,8 +19,11 @@ router.get('/', requireAuth, ADMIN, async (req, res) => {
 
     let where = '1=1';
 
-    // Store scoping for admin: only show logs from users in their store
-    if (req.user.role === 'admin' && req.user.active_store_id) {
+    // Store scoping — when any user has an active store, scope logs to that store's users.
+    // super_admin with NO store (global mode) → sees all logs.
+    // super_admin WITH a store selected → sees logs from that store's users only.
+    // admin → always scoped to their store's users.
+    if (req.user.active_store_id) {
       where += ` AND al.user_id IN (
         SELECT id FROM users WHERE store_id = ${push(req.user.active_store_id)}
         UNION SELECT ${push(req.user.id)}

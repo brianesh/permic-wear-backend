@@ -160,13 +160,17 @@ router.get('/', requireAuth, async (req, res) => {
     let   idx  = 1;
     const push = v => { vals.push(v); return `$${idx++}`; };
 
-    // Store scoping
+    // Store scoping — applies to ALL roles when active_store_id is set.
+    // super_admin with NO store selected (global mode) → sees all stores.
+    // super_admin WITH a store selected → sees only that store.
+    // admin → always scoped to their store.
+    // cashier → scoped to their own sales only.
     if (isCashier) {
       where += ` AND s.cashier_id = ${push(req.user.id)}`;
-    } else if (isAdmin && req.user.active_store_id) {
+    } else if (req.user.active_store_id) {
       where += ` AND s.store_id = ${push(req.user.active_store_id)}`;
     }
-    // super_admin sees all stores (no extra filter)
+    // super_admin with no active store sees ALL stores (global mode)
 
     if (!isCashier && cashier_id) where += ` AND s.cashier_id = ${push(cashier_id)}`;
     if (from)   where += ` AND DATE(s.sale_date) >= ${push(from)}`;
