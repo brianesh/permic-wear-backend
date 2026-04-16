@@ -95,4 +95,14 @@ pool.connect()
     process.exit(1);
   });
 
+// ── Pool error handler — CRITICAL ────────────────────────────────────────────
+// Without this, any connection error (pgBouncer drop, Supabase restart,
+// idle timeout) emits an unhandled 'error' event and crashes the Node process.
+// With this handler, the pool silently removes the broken client and reconnects.
+pool.on('error', (err, client) => {
+  console.error('⚠️  Unexpected DB pool error (client removed):', err.message);
+  // Do NOT call process.exit() — let the pool recover automatically.
+  // pg-pool will remove the dead client and create a fresh one on next request.
+});
+
 module.exports = pool;

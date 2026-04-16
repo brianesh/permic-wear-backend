@@ -159,24 +159,40 @@ router.put('/:id', requireAuth, ADMIN, async (req, res) => {
 
 // DELETE /api/users/:id
 router.delete('/:id', requireAuth, ADMIN, async (req, res) => {
+  // Capture actor details immediately — before any async work —
+  // so they're available even if req changes or auth state shifts.
+  const actorId   = req.user.id;
+  const actorName = req.user.name;
+  const actorRole = req.user.role;
+  const actorIp   = req.ip;
+
   try {
     const { id } = req.params;
     const { rows: [target] } = await db.query('SELECT name, role, store_id FROM users WHERE id = $1', [id]);
     if (!target) return res.status(404).json({ error: 'User not found' });
     if (target.role === 'super_admin')
       return res.status(403).json({ error: 'Cannot delete Super Admin account' });
-    if (parseInt(id) === req.user.id)
+    if (parseInt(id) === actorId)
       return res.status(403).json({ error: 'Cannot delete your own account' });
-    if (req.user.role === 'admin') {
+    if (actorRole === 'admin') {
       if (target.role !== 'cashier')
         return res.status(403).json({ error: 'Admins can only delete cashier accounts' });
       if (target.store_id !== req.user.active_store_id)
         return res.status(403).json({ error: 'Cannot delete users from another store' });
     }
 
-    await db.query('DELETE FROM users WHERE id = $1', [id]);
-    await log(req.user.id, req.user.name, req.user.role, 'user_deleted',
-      target.name, 'User removed', 'users', req.ip);
+    // Soft-delete: deactivate instead of hard DELETE to avoid FK constraint
+    // violations on activity_logs and sales which reference this user's ID.
+    // Hard delete is unsafe because activity_logs.user_id references users(id).
+    await db.query(
+      "UPDATE users SET is_active = FALSE, status = 'inactive', email = CONCAT(email, '_deleted_', id) WHERE id = $1",
+      [id]
+    );
+
+    // Log asynchronously — never let a log failure break the response.
+    // actorId is captured above so it's never null even if req changes.
+    log(actorId, actorName, actorRole, 'user_deleted',
+      target.name, 'User deactivated and removed', 'users', actorIp).catch(() => {});
 
     res.json({ message: 'User deleted' });
   } catch (err) {
