@@ -28,10 +28,11 @@ function storeFilter(user, paramOffset = 1) {
   // admin/cashier → always scoped to their store (+ unassigned for backwards compat).
   const storeId = user.active_store_id;
   if (!storeId) return { clause: '', vals: [], next: paramOffset };
-  // Strict store scoping — only return products belonging to this store.
-  // NULL store_id products are only visible in global mode (no active_store_id).
+  // Include products with NULL store_id (legacy products added before multi-store)
+  // so existing inventory remains visible when a store is selected.
+  // Truly global view (no store selected) shows everything without filter.
   return {
-    clause: ` AND p.store_id = $${paramOffset}`,
+    clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
     vals: [storeId],
     next: paramOffset + 1,
   };
@@ -192,7 +193,7 @@ router.get('/search', requireAuth, async (req, res) => {
 
     let storeSql = '';
     if (req.user.active_store_id) {
-      storeSql = ` AND p.store_id = $${idx}`;
+      storeSql = ` AND (p.store_id = $${idx} OR p.store_id IS NULL)`;
       vals.push(req.user.active_store_id);
       idx++;
     }
