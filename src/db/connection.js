@@ -11,23 +11,49 @@
  *     This routes through Supabase's connection pooler which dramatically
  *     reduces egress vs direct connections (port 5432).
  *   - Falls back to DATABASE_URL if pooler URL not set.
+ *   - Auto-detects pooler URL from DATABASE_URL if it contains port 6543
  *   - Set search_path once per connection, not per query.
  */
 
 const { Pool } = require('pg');
 
-// ── Choose connection string ──────────────────────────────────────────────────
-// SUPABASE_POOLER_URL = your Supabase pooler URL (port 6543, Transaction mode)
-// Found in: Supabase Dashboard → Settings → Database → Connection Pooling
-// Example: postgres://postgres.xxxx:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
-const connectionString = process.env.SUPABASE_POOLER_URL || process.env.DATABASE_URL;
-
-if (process.env.SUPABASE_POOLER_URL) {
-  console.log('🔀 Using Supabase pgBouncer pooler (egress-optimized)');
-} else {
-  console.log('⚠️  SUPABASE_POOLER_URL not set — using direct connection. Set it to reduce egress.');
+// ── Load environment variables ──────────────────────────────────────────────────
+// Ensure dotenv is loaded (works both locally and on Render)
+try {
+  require('dotenv').config();
+} catch (err) {
+  // dotenv might not be installed in production, that's fine
+  if (process.env.NODE_ENV !== 'production') {
+    console.warn('⚠️  dotenv not found, using system environment variables only');
+  }
 }
 
+// ── Smart connection string selection ──────────────────────────────────────────
+// Auto-detect pooler URL if DATABASE_URL uses the pgBouncer port (6543)
+// This handles cases where SUPABASE_POOLER_URL isn't explicitly set in Render
+let connectionString = process.env.SUPABASE_POOLER_URL || process.env.DATABASE_URL;
+
+if (!connectionString) {
+  console.error('❌ No database URL found! Set SUPABASE_POOLER_URL or DATABASE_URL');
+  process.exit(1);
+}
+
+// Auto-detect: if using DATABASE_URL but it has pooler port (6543), treat as pooler
+const isUsingPoolerPort = connectionString.includes(':6543/');
+const isExplicitPooler = !!process.env.SUPABASE_POOLER_URL;
+
+if (isUsingPoolerPort && !isExplicitPooler) {
+  console.log('🔀 Auto-detected Supabase pooler URL from DATABASE_URL (port 6543)');
+  // Set it so the pooler-specific config below activates
+  process.env.SUPABASE_POOLER_URL = connectionString;
+} else if (isExplicitPooler) {
+  console.log('🔀 Using Supabase pgBouncer pooler (egress-optimized)');
+} else {
+  console.warn('⚠️  SUPABASE_POOLER_URL not set — using direct connection. Set it to reduce egress.');
+  console.warn('   Get your pooler URL from: Supabase Dashboard → Settings → Database → Connection Pooling');
+}
+
+// ── Create connection pool ──────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString,
   ssl: { rejectUnauthorized: false },
@@ -92,6 +118,7 @@ pool.connect()
   })
   .catch(err => {
     console.error('❌ PostgreSQL connection failed:', err.message);
+    console.error('   Please check your database credentials and network access');
     process.exit(1);
   });
 
