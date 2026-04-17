@@ -1,8 +1,13 @@
 require('dotenv').config();
 const express=require('express'),cors=require('cors'),helmet=require('helmet'),rateLimit=require('express-rate-limit');
+const compression = require('compression');
 const app=express(),PORT=process.env.PORT||5000,isProd=process.env.NODE_ENV==='production';
 
 app.use(helmet({crossOriginEmbedderPolicy:false,contentSecurityPolicy:false}));
+
+// Gzip compress all responses — cuts JSON egress 60-80%.
+// Must come BEFORE express.json() and routes.
+app.use(compression({ level: 6, threshold: 1024 }));
 
 const allowedOrigins=[process.env.FRONTEND_URL,'http://localhost:5173','http://localhost:4173','http://127.0.0.1:5173'].filter(Boolean);
 app.use(cors({
@@ -55,6 +60,6 @@ app.use((err,_,res,__)=>{
 });
 
 app.listen(PORT,'0.0.0.0',()=>{
-  console.log(`\n🚀 Permic Wear API v6  Port:${PORT}  Mode:${process.env.NODE_ENV||'dev'}  Payment:Tuma\n`);
+  console.log(`\n🚀 Permic Wear API v6  Port:${PORT}  Mode:${process.env.NODE_ENV||'dev'}  Payment:Tuma  Compression:ON\n`);
 });
 module.exports=app;
