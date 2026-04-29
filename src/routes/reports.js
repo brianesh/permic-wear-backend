@@ -26,8 +26,10 @@ function buildFilters(user, from, to, saleAlias = 's', startIdx = 1) {
   let   idx     = startIdx;
   const p = saleAlias ? saleAlias + '.' : '';
 
-  // Store scoping: admin always scoped; super_admin scoped only when they have an active store picked
-  if (user.active_store_id && (user.role === 'admin' || user.role === 'super_admin')) {
+  // Store scoping:
+  // admin          → their store always
+  // super_admin    → selected store if active_store_id set, ALL stores if global mode
+  if (user.active_store_id) {
     clauses.push(`${p}store_id = $${idx++}`);
     vals.push(user.active_store_id);
   }
@@ -127,7 +129,8 @@ router.get('/daily', requireAuth, ADMIN, async (req, res) => {
         COALESCE(SUM(si.qty_total),0) AS units,
         SUM(CASE WHEN s.payment_method='Cash'  THEN s.selling_total ELSE 0 END) AS cash_total,
         SUM(CASE WHEN s.payment_method='Tuma'  THEN s.selling_total ELSE 0 END) AS tuma_total,
-        SUM(CASE WHEN s.payment_method='Split' THEN s.selling_total ELSE 0 END) AS split_total
+        SUM(CASE WHEN s.payment_method='Split' THEN s.selling_total ELSE 0 END) AS split_total,
+        SUM(CASE WHEN s.payment_method='Tuma'  THEN s.selling_total ELSE 0 END) AS mpesa_total
       FROM sales s
       LEFT JOIN (SELECT sale_id, SUM(qty) qty_total FROM sale_items GROUP BY sale_id) si
         ON si.sale_id = s.id
@@ -196,8 +199,9 @@ router.get('/cashiers', requireAuth, async (req, res) => {
     const joinConds = [`s.cashier_id = u.id`, `s.status = 'completed'`];
     if (from) { joinConds.push(`DATE(s.sale_date) >= $${idx++}`); vals.push(from); }
     if (to)   { joinConds.push(`DATE(s.sale_date) <= $${idx++}`); vals.push(to);   }
-    // Store scope on sales JOIN — admin always; super_admin only if they picked a store
-    if (active_store_id && (isAdmin || isSuperAdmin)) {
+    // Store scope: scoped when active_store_id set (both admin and super_admin)
+    // super_admin with no active_store_id → global mode, sees all stores
+    if (active_store_id) {
       joinConds.push(`s.store_id = $${idx++}`);
       vals.push(active_store_id);
     }
@@ -206,8 +210,7 @@ router.get('/cashiers', requireAuth, async (req, res) => {
     const userConds = [`u.status = 'active'`];
     if (isAdmin)   userConds.push(`u.role IN ('admin','cashier')`);
     if (isCashier) { userConds.push(`u.id = $${idx++}`); vals.push(userId); }
-    // Scope to store for admin; super_admin scoped only if they picked a store
-    if (active_store_id && (isAdmin || isSuperAdmin)) {
+    if (active_store_id) {
       userConds.push(`u.store_id = $${idx++}`);
       vals.push(active_store_id);
     }

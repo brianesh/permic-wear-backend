@@ -48,11 +48,15 @@ function storeFilter(user, paramOffset = 1) {
   if (!user) return { clause: '', vals: [], next: paramOffset };
   const storeId = user.active_store_id;
   if (!storeId) return { clause: '', vals: [], next: paramOffset };
-  return {
-    clause: ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`,
-    vals: [storeId],
-    next: paramOffset + 1,
-  };
+  // super_admin in global mode (no active store) sees all products.
+  // admin/cashier are ALWAYS strictly scoped to their store — no OR p.store_id IS NULL
+  // which would leak global products into their store view.
+  // Only products explicitly assigned to this store are shown.
+  const strict = user.role !== 'super_admin';
+  const clause = strict
+    ? ` AND p.store_id = $${paramOffset}`
+    : ` AND (p.store_id = $${paramOffset} OR p.store_id IS NULL)`;
+  return { clause, vals: [storeId], next: paramOffset + 1 };
 }
 
 // ── GET /api/products/grouped ─────────────────────────────────────────────────

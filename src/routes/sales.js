@@ -15,8 +15,9 @@ router.post('/', requireAuth, async (req, res) => {
 
     const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
     const phone = req.body.phone || req.body.mpesa_phone || null;
-    // DB CHECK only allows 'Cash','Tuma','M-Pesa','Split'
-    const payment_method = req.body.payment_method === 'M-Pesa' ? 'Tuma' : req.body.payment_method;
+    // Normalise: frontend may send 'M-Pesa' or 'Tuma' — store as 'Tuma' in DB
+    const payment_method = ['M-Pesa','Tuma'].includes(req.body.payment_method)
+      ? 'Tuma' : req.body.payment_method;
 
     if (!items || !items.length)
       return res.status(400).json({ error: 'No items in sale' });
@@ -160,17 +161,16 @@ router.get('/', requireAuth, async (req, res) => {
     let   idx  = 1;
     const push = v => { vals.push(v); return `$${idx++}`; };
 
-    // Store scoping — applies to ALL roles when active_store_id is set.
-    // super_admin with NO store selected (global mode) → sees all stores.
-    // super_admin WITH a store selected → sees only that store.
-    // admin → always scoped to their store.
-    // cashier → scoped to their own sales only.
+    // Store scoping:
+    // cashier        → own sales only
+    // admin          → their store always
+    // super_admin    → selected store if active_store_id set, ALL stores if global mode
     if (isCashier) {
       where += ` AND s.cashier_id = ${push(req.user.id)}`;
     } else if (req.user.active_store_id) {
       where += ` AND s.store_id = ${push(req.user.active_store_id)}`;
     }
-    // super_admin with no active store sees ALL stores (global mode)
+    // super_admin with no active_store_id → global mode, sees all stores
 
     if (!isCashier && cashier_id) where += ` AND s.cashier_id = ${push(cashier_id)}`;
     if (from)   where += ` AND DATE(s.sale_date) >= ${push(from)}`;
@@ -208,8 +208,14 @@ router.get('/', requireAuth, async (req, res) => {
       items = rows;
     }
 
+    // Map Tuma → 'M-Pesa' for display (stored as 'Tuma' in DB)
+    const mapMethod = m => m === 'Tuma' ? 'M-Pesa' : m;
     res.json({
-      sales: sales.map(s => ({ ...s, items: items.filter(i => i.sale_id === s.id) })),
+      sales: sales.map(s => ({
+        ...s,
+        payment_method: mapMethod(s.payment_method),
+        items: items.filter(i => i.sale_id === s.id),
+      })),
       total: parseInt(total), page: parseInt(page), limit: parseInt(limit),
     });
   } catch (err) {
