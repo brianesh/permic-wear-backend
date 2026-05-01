@@ -20,6 +20,7 @@ const ADMIN  = requireRole('super_admin', 'admin');
 
 // ── Helper: build date + store filter clause ─────────────────────
 // Returns { clauses: string[], vals: any[], nextIdx: number }
+// Uses Nairobi timezone (Africa/Nairobi, UTC+3) for date filtering
 function buildFilters(user, from, to, saleAlias = 's', startIdx = 1) {
   const clauses = [];
   const vals    = [];
@@ -34,8 +35,19 @@ function buildFilters(user, from, to, saleAlias = 's', startIdx = 1) {
     vals.push(user.active_store_id);
   }
 
-  if (from) { clauses.push(`DATE(${p}sale_date) >= $${idx++}`); vals.push(from); }
-  if (to)   { clauses.push(`DATE(${p}sale_date) <= $${idx++}`); vals.push(to);   }
+  // Use Nairobi timezone for date filtering
+  // Convert the date string to Nairobi timezone timestamp range
+  if (from) {
+    clauses.push(`${p}sale_date >= ($${idx}::date AT TIME ZONE 'Africa/Nairobi')::timestamp`);
+    vals.push(from);
+    idx++;
+  }
+  if (to) {
+    // Include the entire 'to' day by adding 1 day
+    clauses.push(`${p}sale_date < (($${idx}::date + INTERVAL '1 day') AT TIME ZONE 'Africa/Nairobi')::timestamp`);
+    vals.push(to);
+    idx++;
+  }
 
   return { clauses, vals, nextIdx: idx };
 }

@@ -173,8 +173,9 @@ router.get('/', requireAuth, async (req, res) => {
     // super_admin with no active_store_id → global mode, sees all stores
 
     if (!isCashier && cashier_id) where += ` AND s.cashier_id = ${push(cashier_id)}`;
-    if (from)   where += ` AND DATE(s.sale_date) >= ${push(from)}`;
-    if (to)     where += ` AND DATE(s.sale_date) <= ${push(to)}`;
+    // Use Nairobi timezone (Africa/Nairobi, UTC+3) for date filtering
+    if (from)   where += ` AND s.sale_date >= (${push(from)}::date AT TIME ZONE 'Africa/Nairobi')::timestamp`;
+    if (to)     where += ` AND s.sale_date < ((${push(to)}::date + INTERVAL '1 day') AT TIME ZONE 'Africa/Nairobi')::timestamp`;
     if (method) where += ` AND s.payment_method = ${push(method)}`;
     if (status && status !== 'All') {
       where = where.replace("s.status = 'completed'", '1=1');
