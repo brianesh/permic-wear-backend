@@ -71,17 +71,22 @@ router.get('/summary', requireAuth, ADMIN, async (req, res) => {
       yestVals   = [req.user.active_store_id];
     }
 
-    const { rows: [yesterday] } = await db.query(
-      `SELECT COALESCE(SUM(selling_total),0) AS revenue
-       FROM sales WHERE status='completed'
-         AND DATE(sale_date) = CURRENT_DATE - INTERVAL '1 day' ${yestStore}`,
-      yestVals
-    );
+    // Use Nairobi timezone (Africa/Nairobi, UTC+3) for today/yesterday calculations
     const { rows: [today] } = await db.query(
       `SELECT COALESCE(SUM(selling_total),0) AS revenue
        FROM sales WHERE status='completed'
-         AND DATE(sale_date) = CURRENT_DATE ${todayStore}`,
+         AND sale_date >= (CURRENT_DATE AT TIME ZONE 'Africa/Nairobi')::timestamp
+         AND sale_date <  (CURRENT_DATE AT TIME ZONE 'Africa/Nairobi' + INTERVAL '1 day')::timestamp
+         ${todayStore}`,
       todayVals
+    );
+    const { rows: [yesterday] } = await db.query(
+      `SELECT COALESCE(SUM(selling_total),0) AS revenue
+       FROM sales WHERE status='completed'
+         AND sale_date >= ((CURRENT_DATE AT TIME ZONE 'Africa/Nairobi')::timestamp - INTERVAL '1 day')
+         AND sale_date <  (CURRENT_DATE AT TIME ZONE 'Africa/Nairobi')::timestamp
+         ${yestStore}`,
+      yestVals
     );
 
     // Low stock — scoped to store
