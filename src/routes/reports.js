@@ -84,19 +84,21 @@ router.get('/summary', requireAuth, ADMIN, async (req, res) => {
     }
 
     // Use Nairobi timezone (Africa/Nairobi, UTC+3) for today/yesterday calculations
+    // CURRENT_TIMESTAMP AT TIME ZONE converts UTC timestamp to Nairobi local time (as text)
+    // We then cast to date, and use AT TIME ZONE to tell PostgreSQL this is Nairobi time
     const { rows: [today] } = await db.query(
       `SELECT COALESCE(SUM(selling_total),0) AS revenue
        FROM sales WHERE status='completed'
-         AND sale_date >= (CURRENT_DATE AT TIME ZONE 'Africa/Nairobi')::timestamp
-         AND sale_date <  (CURRENT_DATE AT TIME ZONE 'Africa/Nairobi' + INTERVAL '1 day')::timestamp
+         AND sale_date >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')::date)::timestamp AT TIME ZONE 'Africa/Nairobi'
+         AND sale_date <  (((CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Africa/Nairobi')
          ${todayStore}`,
       todayVals
     );
     const { rows: [yesterday] } = await db.query(
       `SELECT COALESCE(SUM(selling_total),0) AS revenue
        FROM sales WHERE status='completed'
-         AND sale_date >= ((CURRENT_DATE AT TIME ZONE 'Africa/Nairobi')::timestamp - INTERVAL '1 day')
-         AND sale_date <  (CURRENT_DATE AT TIME ZONE 'Africa/Nairobi')::timestamp
+         AND sale_date >= (((CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')::date - INTERVAL '1 day')::timestamp AT TIME ZONE 'Africa/Nairobi')
+         AND sale_date <  ((CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')::date)::timestamp AT TIME ZONE 'Africa/Nairobi'
          ${yestStore}`,
       yestVals
     );
