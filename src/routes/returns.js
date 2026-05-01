@@ -107,6 +107,7 @@ router.get('/lookup/:ref', requireAuth, ADMIN, async (req, res) => {
 
 // ── POST /api/returns ─────────────────────────────────────────────
 router.post('/', requireAuth, ADMIN, async (req, res) => {
+  const client = await db.connect();
   try {
     const { original_sale_id, items, reason } = req.body;
     if (!original_sale_id || !items?.length) {
@@ -115,38 +116,137 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
 
     console.log(`[Returns] Processing return for sale ${original_sale_id}`);
 
-    const { rows: sales } = await db.query('SELECT * FROM sales WHERE id = $1', [original_sale_id]);
-    if (!sales.length) return res.status(404).json({ error: 'Sale not found' });
+    await client.query('BEGIN');
+
+    const { rows: sales } = await client.query('SELECT * FROM sales WHERE id = $1 FOR UPDATE', [original_sale_id]);
+    if (!sales.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Sale not found' });
+    }
 
     const sale = sales[0];
     const daysSince = Math.floor((Date.now() - new Date(sale.sale_date)) / (1000 * 60 * 60 * 24));
     if (daysSince > RETURN_WINDOW_DAYS) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: `Return window expired (${RETURN_WINDOW_DAYS} days / 4 months)` });
     }
 
+    // Get all sale items for this sale
+    const { rows: allSaleItems } = await client.query(
+      'SELECT * FROM sale_items WHERE sale_id = $1',
+      [original_sale_id]
+    );
+
+    // Track what's being returned vs kept
     let totalRefund = 0;
     const returnedItems = [];
+    const itemsToKeep = []; // Items that are NOT being returned
 
-    for (const item of items) {
-      const { rows: saleItems } = await db.query(
-        'SELECT * FROM sale_items WHERE id = $1 AND sale_id = $2',
-        [item.sale_item_id, original_sale_id]
+    for (const saleItem of allSaleItems) {
+      // Check if this item is being returned
+      const returnEntry = items.find(i => i.sale_item_id === saleItem.id);
+
+      if (returnEntry) {
+        // This item is being returned (possibly partially)
+        const returnQty = parseInt(returnEntry.qty) || 0;
+        const keepQty = saleItem.qty - returnQty;
+
+        if (returnQty > 0) {
+          const refundAmount = parseFloat(saleItem.selling_price || 0) * returnQty;
+          totalRefund += refundAmount;
+
+          // Restock the returned items (only if condition allows)
+          if (returnEntry.restock !== false && returnEntry.condition !== 'unsellable') {
+            await client.query(
+              'UPDATE products SET stock = stock + $1 WHERE id = $2',
+              [returnQty, saleItem.product_id]
+            );
+            console.log(`[Returns] Restocked ${returnQty} of ${saleItem.product_name}`);
+          }
+
+          returnedItems.push({
+            product_name: saleItem.product_name,
+            qty: returnQty,
+            refund: refundAmount,
+            sku: saleItem.sku,
+            size: saleItem.size
+          });
+        }
+
+        // If there are remaining items to keep, add to keep list
+        if (keepQty > 0) {
+          itemsToKeep.push({
+            ...saleItem,
+            qty: keepQty,
+            extra_profit: saleItem.extra_profit * (keepQty / saleItem.qty),
+            commission: saleItem.commission * (keepQty / saleItem.qty)
+          });
+        }
+      } else {
+        // This item is not being returned at all
+        itemsToKeep.push(saleItem);
+      }
+    }
+
+    // Check if ALL items are being returned
+    const allItemsFullyReturned = itemsToKeep.length === 0;
+
+    if (allItemsFullyReturned) {
+      // ALL items returned - delete the entire sale
+      // Delete sale_items first (or let ON DELETE CASCADE handle it)
+      await client.query('DELETE FROM sale_items WHERE sale_id = $1', [original_sale_id]);
+      await client.query('DELETE FROM sales WHERE id = $1', [original_sale_id]);
+      console.log(`[Returns] Deleted sale ${original_sale_id} (${sale.txn_id}) - all items returned`);
+    } else {
+      // PARTIAL return - we need to:
+      // 1. Delete the original sale and sale_items
+      // 2. Create a new sale with only the kept items
+
+      // Calculate new totals for the kept items
+      let newSellingTotal = 0;
+      let newExtraProfit = 0;
+      let newCommission = 0;
+
+      for (const item of itemsToKeep) {
+        newSellingTotal += parseFloat(item.selling_price) * item.qty;
+        newExtraProfit += parseFloat(item.extra_profit) || 0;
+        newCommission += parseFloat(item.commission) || 0;
+      }
+
+      // Delete original sale items
+      await client.query('DELETE FROM sale_items WHERE sale_id = $1', [original_sale_id]);
+
+      // Update the sale with new totals
+      await client.query(
+        `UPDATE sales SET
+          selling_total = $1,
+          extra_profit = $2,
+          commission = $3
+         WHERE id = $4`,
+        [newSellingTotal, newExtraProfit, newCommission, original_sale_id]
       );
-      if (!saleItems.length) return res.status(404).json({ error: 'Sale item not found' });
 
-      const saleItem = saleItems[0];
-      const refundAmount = parseFloat(saleItem.selling_price || 0) * item.qty;
-      totalRefund += refundAmount;
+      // Re-insert the kept items
+      for (const item of itemsToKeep) {
+        await client.query(
+          `INSERT INTO sale_items
+            (sale_id, product_id, product_name, sku, size, qty, min_price,
+             selling_price, extra_profit, commission)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [original_sale_id, item.product_id, item.product_name, item.sku, item.size,
+           item.qty, item.min_price, item.selling_price, item.extra_profit, item.commission]
+        );
+      }
 
-      await db.query('UPDATE products SET stock = stock + $1 WHERE id = $2', [item.qty, saleItem.product_id]);
-      returnedItems.push({ product_name: saleItem.product_name, qty: item.qty, refund: refundAmount });
-      console.log(`[Returns] Restocked ${item.qty} of ${saleItem.product_name}`);
+      console.log(`[Returns] Updated sale ${original_sale_id} (${sale.txn_id}) - partial return, ${itemsToKeep.length} items kept`);
     }
 
     await log(req.user.id, req.user.name, req.user.role, 'return_processed',
       `Sale ${original_sale_id} (${sale.txn_id})`,
       `KES ${totalRefund} refunded. Items: ${returnedItems.map(i => `${i.qty}x ${i.product_name}`).join(', ')}. Reason: ${reason || 'None'}`,
       'sale', req.ip);
+
+    await client.query('COMMIT');
 
     console.log(`[Returns] Return completed for sale ${original_sale_id}, refund: KES ${totalRefund}`);
 
@@ -156,12 +256,18 @@ router.post('/', requireAuth, ADMIN, async (req, res) => {
       txn_id: sale.txn_id,
       total_refund: totalRefund,
       items_returned: returnedItems,
-      message: `✅ Return processed. KES ${totalRefund} refunded. Inventory restocked.`,
+      sale_deleted: allItemsFullyReturned,
+      message: allItemsFullyReturned
+        ? `✅ Return processed. Sale deleted. KES ${totalRefund} refunded. Inventory restocked.`
+        : `✅ Return processed. Sale updated. KES ${totalRefund} refunded. Inventory restocked.`,
     });
 
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('[Returns] POST error:', err.message);
     res.status(500).json({ error: 'Return processing failed: ' + err.message });
+  } finally {
+    client.release();
   }
 });
 
