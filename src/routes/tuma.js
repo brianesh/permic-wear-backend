@@ -42,14 +42,44 @@ async function deductStock(saleId) {
 
 // ── Complete a sale (idempotent) ──────────────────────────────────
 async function completeSale(saleId, paymentRef = '') {
-  const { rows: [sale] } = await db.query('SELECT status FROM sales WHERE id = $1', [saleId]);
-  if (!sale || sale.status === 'completed') return false;
+  const { rows: [sale] } = await db.query(
+    'SELECT status, selling_total, tuma_ref, mpesa_ref FROM sales WHERE id = $1', 
+    [saleId]
+  );
+  
+  // If sale doesn't exist or is already completed, return false (no action taken)
+  if (!sale) return false;
+  if (sale.status === 'completed') {
+    console.log(`[Tuma] Sale ${saleId} already completed - skipping (idempotent)`);
+    return false;
+  }
+  
+  // Prevent completing failed sales
+  if (sale.status === 'failed') {
+    console.log(`[Tuma] Sale ${saleId} is marked as failed - cannot complete`);
+    return false;
+  }
 
-  // Update sale - store payment ref in both tuma_ref and mpesa_ref columns
-  await db.query(
-    `UPDATE sales SET status='completed', tuma_ref=$1, mpesa_ref=$1, amount_paid=selling_total WHERE id=$2`,
+  // Use atomic update to prevent race conditions
+  const { rows: [updated] } = await db.query(
+    `UPDATE sales 
+     SET status='completed', 
+         tuma_ref=COALESCE($1, tuma_ref), 
+         mpesa_ref=COALESCE($1, mpesa_ref), 
+         amount_paid=selling_total,
+         completed_at=NOW()
+     WHERE id=$2 
+     AND status NOT IN ('completed', 'failed')
+     RETURNING id`,
     [paymentRef, saleId]
   );
+  
+  // If no rows were updated, the sale was already completed by another process
+  if (!updated) {
+    console.log(`[Tuma] Sale ${saleId} was completed by another process - skipping`);
+    return false;
+  }
+
   await deductStock(saleId);
 
   // Async SMS confirmation

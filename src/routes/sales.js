@@ -13,7 +13,7 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { items, amount_paid = 0, tuma_portion, mpesa_portion } = req.body;
+    const { items, amount_paid = 0, tuma_portion, mpesa_portion, idempotency_key } = req.body;
     const phone = req.body.phone || req.body.mpesa_phone || null;
     // Normalise: frontend may send 'M-Pesa' or 'Tuma' — store as 'Tuma' in DB
     const payment_method = ['M-Pesa','Tuma'].includes(req.body.payment_method)
@@ -23,6 +23,75 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'No items in sale' });
     if (!['Cash', 'Tuma', 'M-Pesa', 'Split'].includes(req.body.payment_method))
       return res.status(400).json({ error: 'Invalid payment method' });
+
+    // ── IDEMPOTENCY CHECK ──────────────────────────────────────────
+    // If an idempotency key is provided, check if we've already processed this request
+    if (idempotency_key) {
+      const { rows: [existingKey] } = await client.query(
+        `SELECT ik.*, s.txn_id, s.id as sale_db_id, s.selling_total, s.payment_method, s.status
+         FROM idempotency_keys ik
+         JOIN sales s ON ik.sale_id = s.id
+         WHERE ik.key = $1 AND ik.created_at > NOW() - INTERVAL '24 hours'`,
+        [idempotency_key]
+      );
+      
+      if (existingKey) {
+        console.log(`[Sales] Duplicate request detected - returning existing sale: ${existingKey.txn_id}`);
+        await client.query('ROLLBACK');
+        return res.status(200).json({
+          txn_id: existingKey.txn_id,
+          sale_id: existingKey.sale_db_id,
+          selling_total: existingKey.selling_total,
+          amount_paid: existingKey.selling_total,
+          change_given: 0,
+          extra_profit: 0,
+          commission: 0,
+          commission_rate: 0,
+          status: existingKey.status,
+          message: 'Sale already recorded (idempotent response)',
+          idempotent: true
+        });
+      }
+    }
+
+    // ── DUPLICATE SALE DETECTION ───────────────────────────────────
+    // Check for similar recent sales (same cashier, same total, within 30 seconds)
+    // This catches cases where idempotency key wasn't sent
+    const calculatedTotal = items.reduce((sum, item) => sum + (parseFloat(item.selling_price) * item.qty), 0);
+    const { rows: [recentSale] } = await client.query(
+      `SELECT id, txn_id, status FROM sales 
+       WHERE cashier_id = $1 
+       AND selling_total = $2 
+       AND status IN ('completed', 'pending_tuma', 'pending_split')
+       AND sale_date > NOW() - INTERVAL '30 seconds'
+       ORDER BY sale_date DESC 
+       LIMIT 1`,
+      [req.user.id, calculatedTotal]
+    );
+    
+    if (recentSale) {
+      // Check if the items match (same products and quantities)
+      const { rows: recentItems } = await client.query(
+        'SELECT product_id, qty FROM sale_items WHERE sale_id = $1',
+        [recentSale.id]
+      );
+      
+      const isDuplicate = items.length === recentItems.length && 
+        items.every(item => recentItems.some(ri => 
+          ri.product_id === item.product_id && ri.qty === item.qty
+        ));
+      
+      if (isDuplicate) {
+        console.log(`[Sales] Potential duplicate sale detected - returning existing: ${recentSale.txn_id}`);
+        await client.query('ROLLBACK');
+        return res.status(200).json({
+          txn_id: recentSale.txn_id,
+          sale_id: recentSale.id,
+          message: 'Similar sale recently created (duplicate prevention)',
+          duplicate: true
+        });
+      }
+    }
 
     const { rows: [cashier] } = await client.query(
       'SELECT commission_rate FROM users WHERE id = $1', [req.user.id]
@@ -100,6 +169,26 @@ router.post('/', requireAuth, async (req, res) => {
           'UPDATE products SET stock = stock - $1 WHERE id = $2', [li.qty, li.product.id]
         );
       }
+    }
+
+    // Save idempotency key if provided
+    if (idempotency_key) {
+      await client.query(
+        `INSERT INTO idempotency_keys (key, sale_id, response)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET sale_id = EXCLUDED.sale_id`,
+        [idempotency_key, saleId, JSON.stringify({
+          txn_id: txnId,
+          sale_id: saleId,
+          selling_total: sellingTotal,
+          amount_paid: amountPaidNum,
+          change_given: changeGiven,
+          extra_profit: extraProfit,
+          commission: totalCommission,
+          commission_rate: commissionRate,
+          status: saleStatus
+        })]
+      );
     }
 
     await client.query('COMMIT');
