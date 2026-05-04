@@ -211,10 +211,11 @@ router.post('/', requireAuth, async (req, res) => {
       }
     }
 
-    await client.query('COMMIT');
-
+    // Log the sale BEFORE committing to ensure it's recorded even if commit fails
     await log(req.user.id, req.user.name, req.user.role, 'sale', txnId,
       `KES ${sellingTotal.toLocaleString()} — ${payment_method}`, 'sale', req.ip);
+
+    await client.query('COMMIT');
 
     for (const li of lineItems) {
       db.query(
