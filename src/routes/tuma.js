@@ -66,8 +66,7 @@ async function completeSale(saleId, paymentRef = '') {
      SET status='completed', 
          tuma_ref=COALESCE($1, tuma_ref), 
          mpesa_ref=COALESCE($1, mpesa_ref), 
-         amount_paid=selling_total,
-         completed_at=NOW()
+         amount_paid=selling_total
      WHERE id=$2 
      AND status NOT IN ('completed', 'failed')
      RETURNING id`,
