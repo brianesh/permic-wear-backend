@@ -26,31 +26,41 @@ router.post('/', requireAuth, async (req, res) => {
 
     // ── IDEMPOTENCY CHECK ──────────────────────────────────────────
     // If an idempotency key is provided, check if we've already processed this request
+    // Note: This check is skipped if the idempotency_keys table doesn't exist yet (pre-migration)
     if (idempotency_key) {
-      const { rows: [existingKey] } = await client.query(
-        `SELECT ik.*, s.txn_id, s.id as sale_db_id, s.selling_total, s.payment_method, s.status
-         FROM idempotency_keys ik
-         JOIN sales s ON ik.sale_id = s.id
-         WHERE ik.key = $1 AND ik.created_at > NOW() - INTERVAL '24 hours'`,
-        [idempotency_key]
-      );
-      
-      if (existingKey) {
-        console.log(`[Sales] Duplicate request detected - returning existing sale: ${existingKey.txn_id}`);
-        await client.query('ROLLBACK');
-        return res.status(200).json({
-          txn_id: existingKey.txn_id,
-          sale_id: existingKey.sale_db_id,
-          selling_total: existingKey.selling_total,
-          amount_paid: existingKey.selling_total,
-          change_given: 0,
-          extra_profit: 0,
-          commission: 0,
-          commission_rate: 0,
-          status: existingKey.status,
-          message: 'Sale already recorded (idempotent response)',
-          idempotent: true
-        });
+      try {
+        const { rows: [existingKey] } = await client.query(
+          `SELECT ik.*, s.txn_id, s.id as sale_db_id, s.selling_total, s.payment_method, s.status
+           FROM idempotency_keys ik
+           JOIN sales s ON ik.sale_id = s.id
+           WHERE ik.key = $1 AND ik.created_at > NOW() - INTERVAL '24 hours'`,
+          [idempotency_key]
+        );
+        
+        if (existingKey) {
+          console.log(`[Sales] Duplicate request detected - returning existing sale: ${existingKey.txn_id}`);
+          await client.query('ROLLBACK');
+          return res.status(200).json({
+            txn_id: existingKey.txn_id,
+            sale_id: existingKey.sale_db_id,
+            selling_total: existingKey.selling_total,
+            amount_paid: existingKey.selling_total,
+            change_given: 0,
+            extra_profit: 0,
+            commission: 0,
+            commission_rate: 0,
+            status: existingKey.status,
+            message: 'Sale already recorded (idempotent response)',
+            idempotent: true
+          });
+        }
+      } catch (err) {
+        // If the idempotency_keys table doesn't exist yet, log and continue
+        if (err.code === '42P01') { // PostgreSQL error: relation does not exist
+          console.log('[Sales] idempotency_keys table not found - skipping idempotency check. Run migration to enable this feature.');
+        } else {
+          throw err; // Re-throw other errors
+        }
       }
     }
 
@@ -171,24 +181,34 @@ router.post('/', requireAuth, async (req, res) => {
       }
     }
 
-    // Save idempotency key if provided
+    // Save idempotency key if provided (graceful if table doesn't exist)
     if (idempotency_key) {
-      await client.query(
-        `INSERT INTO idempotency_keys (key, sale_id, response)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (key) DO UPDATE SET sale_id = EXCLUDED.sale_id`,
-        [idempotency_key, saleId, JSON.stringify({
-          txn_id: txnId,
-          sale_id: saleId,
-          selling_total: sellingTotal,
-          amount_paid: amountPaidNum,
-          change_given: changeGiven,
-          extra_profit: extraProfit,
-          commission: totalCommission,
-          commission_rate: commissionRate,
-          status: saleStatus
-        })]
-      );
+      try {
+        await client.query(
+          `INSERT INTO idempotency_keys (key, sale_id, response)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (key) DO UPDATE SET sale_id = EXCLUDED.sale_id`,
+          [idempotency_key, saleId, JSON.stringify({
+            txn_id: txnId,
+            sale_id: saleId,
+            selling_total: sellingTotal,
+            amount_paid: amountPaidNum,
+            change_given: changeGiven,
+            extra_profit: extraProfit,
+            commission: totalCommission,
+            commission_rate: commissionRate,
+            status: saleStatus
+          })]
+        );
+      } catch (err) {
+        // If the idempotency_keys table doesn't exist yet, log and continue
+        if (err.code === '42P01') {
+          console.log('[Sales] idempotency_keys table not found - skipping key storage. Run migration to enable this feature.');
+        } else {
+          console.error('[Sales] Error saving idempotency key:', err.message);
+          // Don't fail the sale if idempotency key storage fails
+        }
+      }
     }
 
     await client.query('COMMIT');
