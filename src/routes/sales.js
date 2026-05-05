@@ -13,8 +13,10 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { items, amount_paid = 0, tuma_portion, mpesa_portion, idempotency_key } = req.body;
-    const phone = req.body.phone || req.body.mpesa_phone || null;
+    const { items, amount_paid = 0, tuma_portion, mpesa_portion, idempotency_key,
+            cash_amount, mpesa_amount } = req.body;
+    // For split payments, phone may come as 'phone', 'mpesa_phone', or 'split_phone'
+    const phone = req.body.phone || req.body.mpesa_phone || req.body.split_phone || null;
     // Normalise: frontend may send 'M-Pesa' or 'Tuma' — store as 'Tuma' in DB
     const payment_method = ['M-Pesa','Tuma'].includes(req.body.payment_method)
       ? 'Tuma' : req.body.payment_method;
@@ -141,6 +143,9 @@ router.post('/', requireAuth, async (req, res) => {
                          ? Math.max(0, amountPaidNum - sellingTotal) : 0;
     const txnId          = `TXN-${uuidv4().replace(/-/g,'').slice(0,8).toUpperCase()}`;
     const tumaPortionNum = parseFloat(tuma_portion || mpesa_portion) || 0;
+    // For split payments: record the cash and M-Pesa breakdown
+    const cashAmountNum  = parseFloat(cash_amount)  || (payment_method === 'Split' ? Math.max(0, sellingTotal - tumaPortionNum) : 0);
+    const mpesaAmountNum = parseFloat(mpesa_amount) || (payment_method === 'Split' ? tumaPortionNum : 0);
 
     let saleStatus;
     if (payment_method === 'Tuma' || payment_method === 'M-Pesa') saleStatus = 'pending_tuma';
@@ -154,11 +159,12 @@ router.post('/', requireAuth, async (req, res) => {
       `INSERT INTO sales
          (txn_id, cashier_id, payment_method, selling_total, amount_paid,
           change_given, extra_profit, commission, commission_rate,
-          mpesa_phone, phone, store_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+          mpesa_phone, phone, store_id, status, cash_amount, mpesa_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
        [txnId, req.user.id, payment_method, sellingTotal, amountPaidNum,
         changeGiven, extraProfit, totalCommission, commissionRate,
-        phone || null, phone || null, storeId, saleStatus]
+        phone || null, phone || null, storeId, saleStatus,
+        cashAmountNum || null, mpesaAmountNum || null]
     );
     const saleId = saleRow.id;
 
@@ -266,6 +272,7 @@ router.get('/', requireAuth, async (req, res) => {
 
     const { from, to, cashier_id, method, status, page = 1, limit = 20 } = req.query;
 
+    // Default: show completed sales (includes all payment methods: Cash, Tuma/M-Pesa, Split)
     let where  = "s.status = 'completed'";
     const vals = [];
     let   idx  = 1;
@@ -286,7 +293,11 @@ router.get('/', requireAuth, async (req, res) => {
     // Use Nairobi timezone (Africa/Nairobi, UTC+3) for date filtering
     if (from)   where += ` AND s.sale_date >= (${push(from)}::date AT TIME ZONE 'Africa/Nairobi')::timestamp`;
     if (to)     where += ` AND s.sale_date < ((${push(to)}::date + INTERVAL '1 day') AT TIME ZONE 'Africa/Nairobi')::timestamp`;
-    if (method) where += ` AND s.payment_method = ${push(method)}`;
+    // Map frontend display names to DB values ('M-Pesa' and 'Tuma' are both stored as 'Tuma')
+    if (method) {
+      const dbMethod = method === 'M-Pesa' ? 'Tuma' : method;
+      where += ` AND s.payment_method = ${push(dbMethod)}`;
+    }
     if (status && status !== 'All') {
       where = where.replace("s.status = 'completed'", '1=1');
       where += ` AND s.status = ${push(status)}`;
